@@ -1,0 +1,142 @@
+#!/bin/bash
+# Claude Code Account Switcher
+# Usage: ccc [args...]    - launches claude with account picker
+#        ccc N [args...]  - launches directly with Account N
+#        ccc add [name]   - add a new account
+#
+# Named "ccc", not "cc", because /usr/bin/cc is the C compiler on macOS.
+
+PROFILES_DIR="$HOME/.claude-profiles"
+PICKER="$PROFILES_DIR/picker.mjs"
+CONFIG="$PROFILES_DIR/config.json"
+
+# Every account shares ONE session history: <profile>/projects is a symlink to
+# ~/.claude/projects, so /resume and the memory dir are common to all accounts.
+# A profile that gets created on first login (rather than by `ccc add`) would
+# otherwise end up with its own isolated projects dir, so wire the link before
+# launching. If projects already exists as a real directory it is left alone,
+# never clobbered.
+ensure_shared_projects() {
+    local dir="$1"
+    [[ -z "$dir" ]] && return 0
+    mkdir -p "$dir" 2>/dev/null || return 0
+    if [[ ! -e "$dir/projects" && ! -L "$dir/projects" ]]; then
+        mkdir -p "$HOME/.claude/projects" 2>/dev/null
+        ln -s "$HOME/.claude/projects" "$dir/projects" 2>/dev/null
+    fi
+}
+
+# ── ccc add [name] — add a new account ────────────────────────
+if [[ "$1" == "add" ]]; then
+    shift
+    CUSTOM_NAME="$*"
+
+    # Find next account number
+    NEXT=$(node -e "
+        const fs = require('fs');
+        let c = { accounts: {} };
+        try { c = JSON.parse(fs.readFileSync('$CONFIG','utf8')); } catch {}
+        const keys = Object.keys(c.accounts).map(Number).filter(n => !isNaN(n));
+        console.log(Math.max(...keys, 0) + 1);
+    " 2>/dev/null)
+
+    if [[ -z "$NEXT" ]]; then
+        echo "  Error: could not determine next account number."
+        exit 1
+    fi
+
+    DIR_NAME="account$NEXT"
+    ACCT_DIR="$PROFILES_DIR/$DIR_NAME"
+
+    # Prompt for name if not provided
+    if [[ -z "$CUSTOM_NAME" ]]; then
+        read -rp "  Account name [Account $NEXT]: " CUSTOM_NAME
+        [[ -z "$CUSTOM_NAME" ]] && CUSTOM_NAME="Account $NEXT"
+    fi
+
+    # Create directory and settings
+    mkdir -p "$ACCT_DIR"
+
+    # Add to config.json. Values go through the environment, not string
+    # interpolation, so a name containing quotes cannot break the script.
+    CC_CONFIG="$CONFIG" CC_KEY="$NEXT" CC_NAME="$CUSTOM_NAME" CC_DIR="$DIR_NAME" node -e '
+        const fs = require("fs");
+        let c = { accounts: {} };
+        try { c = JSON.parse(fs.readFileSync(process.env.CC_CONFIG, "utf8")); } catch {}
+        c.accounts[process.env.CC_KEY] = {
+            name: process.env.CC_NAME,
+            configDir: process.env.CC_DIR,
+        };
+        fs.writeFileSync(process.env.CC_CONFIG, JSON.stringify(c, null, 2) + "\n");
+    ' 2>/dev/null
+
+    # Create settings.json with statusline
+    node -e "
+        const fs = require('fs');
+        const h = require('os').homedir().replace(/\\\\/g, '/');
+        const s = { statusLine: { type: 'command', command: 'node ' + h + '/.claude-profiles/statusline.js' } };
+        fs.writeFileSync('$ACCT_DIR/settings.json', JSON.stringify(s, null, 2) + '\n');
+    " 2>/dev/null
+
+    ensure_shared_projects "$ACCT_DIR"
+
+    echo ""
+    echo "  Account $NEXT added!"
+    echo ""
+    echo "  Name:      $CUSTOM_NAME"
+    echo "  Directory:  $ACCT_DIR"
+    echo ""
+    echo "  Run 'ccc $NEXT' to log in and start using it."
+    echo ""
+    exit 0
+fi
+
+# ── ccc <number> — quick-switch ───────────────────────────────
+if [[ "$1" =~ ^-?[0-9]+$ ]]; then
+    ACCT="${1#-}"
+    shift
+
+    # Resolve this slot's config dir from config.json.
+    DIR=""
+    if [[ -f "$CONFIG" ]] && command -v node &>/dev/null; then
+        DIR=$(CC_CONFIG="$CONFIG" CC_KEY="$ACCT" node -e '
+            try {
+                const c = JSON.parse(require("fs").readFileSync(process.env.CC_CONFIG, "utf8"));
+                const a = c.accounts[process.env.CC_KEY];
+                if (a && a.configDir) process.stdout.write(a.configDir);
+                else if (a) process.stdout.write("__DEFAULT__");
+            } catch {}
+        ' 2>/dev/null)
+    fi
+
+    # No entry in config.json: slot 1 is the default profile, anything else
+    # falls back to the accountN naming convention.
+    if [[ -z "$DIR" ]]; then
+        if [[ "$ACCT" == "1" ]]; then DIR="__DEFAULT__"; else DIR="account$ACCT"; fi
+    fi
+
+    if [[ "$DIR" == "__DEFAULT__" ]]; then
+        unset CLAUDE_CONFIG_DIR
+    else
+        export CLAUDE_CONFIG_DIR="$PROFILES_DIR/$DIR"
+        ensure_shared_projects "$CLAUDE_CONFIG_DIR"
+    fi
+
+    exec claude "$@"
+fi
+
+# ── ccc — interactive picker ──────────────────────────────────
+profile_path=$(node "$PICKER")
+
+if [[ -z "$profile_path" ]]; then
+    exit 0
+fi
+
+if [[ "$profile_path" == "__DEFAULT__" ]]; then
+    unset CLAUDE_CONFIG_DIR
+else
+    export CLAUDE_CONFIG_DIR="$profile_path"
+    ensure_shared_projects "$profile_path"
+fi
+
+exec claude "$@"

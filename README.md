@@ -26,7 +26,7 @@ The account badge color tells you which account is active at a glance — no nee
 
 ## Account Picker
 
-Run `cc` to get the interactive picker:
+Run `ccc` to get the interactive picker:
 
 ```
   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
@@ -54,7 +54,24 @@ Claude Code uses the `CLAUDE_CONFIG_DIR` environment variable to determine where
 - **Account 1** uses the default `~/.claude` directory
 - **Account 2+** use isolated directories under `~/.claude-profiles/`
 - Shared data (projects, todos, settings) is symlinked so all accounts see the same workspace
-- Each account keeps its own `.credentials.json` for independent authentication
+- Each account authenticates independently
+
+The launcher is called `ccc`, not `cc`, because `/usr/bin/cc` is the system C compiler on macOS and most Linux distros. Installing a `cc` into a directory early in `PATH` would shadow it and break anything that shells out to the compiler.
+
+### Where credentials live
+
+On **macOS**, Claude Code stores OAuth credentials in the login Keychain rather than on disk, under these service names:
+
+| Profile | Keychain service |
+|---------|------------------|
+| Default (`~/.claude`, no `CLAUDE_CONFIG_DIR`) | `Claude Code-credentials` |
+| Any other profile | `Claude Code-credentials-<sha256(absolute config dir)[0:8]>` |
+
+The picker detects a logged-in account with `security find-generic-password -s "<service>"` and deliberately **no** `-w` flag. An attribute-only lookup confirms the entry exists without reading the secret, so macOS never shows a Keychain permission prompt and the check costs about 10 ms.
+
+On **Linux and Windows**, and on older Claude Code builds, credentials are still a `.credentials.json` file inside the config directory. The picker checks that path too, so both storage models work.
+
+The account email and plan shown in the picker come from each profile's `.claude.json` under the `oauthAccount` key, which is plain JSON and needs no Keychain access. Note that the default profile's copy lives at `~/.claude.json` in your home directory, while every other profile keeps its own inside the config directory.
 
 ## Prerequisites
 
@@ -87,7 +104,7 @@ The installer will:
 1. Create `~/.claude-profiles/` with the picker, statusline, and config files
 2. Set up an `account2` directory with symlinks to shared data
 3. Configure the statusline in Claude Code's `settings.json`
-4. Install the `cc` launcher to `~/.local/bin/`
+4. Install the `ccc` launcher to `~/.local/bin/`
 
 ### Custom install directory
 
@@ -101,21 +118,21 @@ bash install.sh /usr/local/bin
 
 ```bash
 # Open the interactive account picker
-cc
+ccc
 
 # Launch directly with any account by number
-cc 1        # Account 1 (default ~/.claude)
-cc 2        # Account 2
-cc 3        # Account 3 (if configured)
+ccc 1        # Account 1 (default ~/.claude)
+ccc 2        # Account 2
+ccc 3        # Account 3 (if configured)
 
 # Add a new account
-cc add              # prompts for a name
-cc add My Work      # creates with name "My Work"
+ccc add              # prompts for a name
+ccc add My Work      # creates with name "My Work"
 
 # Pass any Claude Code flags after the account number
-cc 2 --dangerously-skip-permissions
-cc 1 -c    # continue mode
-cc 3 -r "fix the bug in auth.ts"
+ccc 2 --dangerously-skip-permissions
+ccc 1 -c    # continue mode
+ccc 3 -r "fix the bug in auth.ts"
 ```
 
 ## First-Time Setup for New Accounts
@@ -123,8 +140,8 @@ cc 3 -r "fix the bug in auth.ts"
 After installing, log in with each additional account:
 
 ```bash
-cc 2    # logs into Account 2
-cc 3    # logs into Account 3 (if configured)
+ccc 2    # logs into Account 2
+ccc 3    # logs into Account 3 (if configured)
 ```
 
 Claude Code will detect there are no credentials and prompt you to authenticate. Log in with that account. After that, the picker will show the account as configured.
@@ -181,11 +198,11 @@ Edit `~/.claude-profiles/claude-powerline.json` to customize which segments appe
 
 ### Adding more accounts
 
-Use `cc add` to add a new account in one step:
+Use `ccc add` to add a new account in one step:
 
 ```bash
-cc add                  # prompts for a name
-cc add Client Project   # creates with name "Client Project"
+ccc add                  # prompts for a name
+ccc add Client Project   # creates with name "Client Project"
 ```
 
 This automatically:
@@ -194,7 +211,7 @@ This automatically:
 - Updates `config.json`
 - Sets up `settings.json` with the statusline
 
-Then run `cc N` to log in with the new account. The picker will show it immediately.
+Then run `ccc N` to log in with the new account. The picker will show it immediately.
 
 ## How the Statusline Works
 
@@ -218,8 +235,12 @@ The installer creates symlinks so all accounts share:
 | `statsig/` | Analytics/feature flags |
 
 **Not shared** (per-account):
-- `.credentials.json` — each account has its own login
+- Credentials — each account has its own login (Keychain entry on macOS, `.credentials.json` elsewhere)
+- `.claude.json` — per-account identity and state
 - `settings.json` — each account has its own settings (needed for individual statusline config)
+- `history.jsonl`, `sessions/`, `shell-snapshots/` — per-account session bookkeeping
+
+Because `projects/` is shared, `/resume` in one account lists sessions started under any other account, and the memory directory is common to all of them. `ccc` enforces this on every launch path, so a profile created by logging in for the first time gets the link too. An existing real `projects` directory is never replaced.
 
 ## Project Structure
 
@@ -231,8 +252,8 @@ claude-multi-account/
 ├── install.sh                  # Installer for macOS/Linux/Git Bash
 ├── install.bat                 # Installer for Windows CMD
 ├── bin/
-│   ├── cc                      # Bash launcher script
-│   └── cc.bat                  # Windows CMD launcher script
+│   ├── ccc                     # Bash launcher script
+│   └── ccc.bat                 # Windows CMD launcher script
 ├── src/
 │   ├── picker.mjs              # Interactive account picker UI
 │   └── statusline.js           # Statusline script (account badge + powerline)
@@ -244,8 +265,8 @@ claude-multi-account/
 ## Uninstall
 
 ```bash
-rm ~/.local/bin/cc
-rm ~/.local/bin/cc.bat      # Windows only
+rm ~/.local/bin/ccc
+rm ~/.local/bin/ccc.bat      # Windows only
 rm -rf ~/.claude-profiles   # Removes all profiles, config, and account2 credentials
 ```
 

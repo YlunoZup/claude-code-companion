@@ -115,11 +115,11 @@ if not "%~1"=="" set "BIN_DIR=%~1"
 
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 
-copy /Y "%SCRIPT_DIR%bin\cc.bat" "%BIN_DIR%\cc.bat" >nul
-echo   [ OK] Installed cc.bat -^> %BIN_DIR%\cc.bat
+copy /Y "%SCRIPT_DIR%bin\ccc.bat" "%BIN_DIR%\ccc.bat" >nul
+echo   [ OK] Installed ccc.bat -^> %BIN_DIR%\ccc.bat
 
-copy /Y "%SCRIPT_DIR%bin\cc" "%BIN_DIR%\cc" >nul
-echo   [ OK] Installed cc -^> %BIN_DIR%\cc
+copy /Y "%SCRIPT_DIR%bin\ccc" "%BIN_DIR%\ccc" >nul
+echo   [ OK] Installed ccc -^> %BIN_DIR%\ccc
 
 :: ── Check PATH ──────────────────────────────────────────────
 echo %PATH% | findstr /I /C:"%BIN_DIR%" >nul
@@ -139,17 +139,17 @@ echo.
 echo   Installation complete!
 echo.
 echo   Usage:
-echo     cc          Open account picker
-echo     cc 1        Launch with Account 1 (default)
-echo     cc 2        Launch with Account 2
-echo     cc 2 -c     Launch Account 2 in continue mode
+echo     ccc          Open account picker
+echo     ccc 1        Launch with Account 1 (default)
+echo     ccc 2        Launch with Account 2
+echo     ccc 2 -c     Launch Account 2 in continue mode
 echo.
 echo   Statusline:
 echo     Configured automatically. Your Claude Code sessions
 echo     will show the account badge and powerline segments.
 echo.
 echo   First-time setup for Account 2:
-echo     Run "cc 2" and log in when prompted.
+echo     Run "ccc 2" and log in when prompted.
 echo.
 
 endlocal

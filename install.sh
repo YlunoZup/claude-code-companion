@@ -172,14 +172,24 @@ fi
 
 mkdir -p "$BIN_DIR"
 
-cp "$SCRIPT_DIR/bin/cc" "$BIN_DIR/cc"
-chmod +x "$BIN_DIR/cc"
-ok "Installed cc -> $BIN_DIR/cc"
+# The launcher is called "ccc", not "cc": on macOS and most Linux distros
+# /usr/bin/cc is the system C compiler, and BIN_DIR is meant to sit early in
+# PATH, so installing a "cc" here would shadow the compiler and break builds
+# that shell out to it (make, node-gyp, and so on).
+cp "$SCRIPT_DIR/bin/ccc" "$BIN_DIR/ccc"
+chmod +x "$BIN_DIR/ccc"
+ok "Installed ccc -> $BIN_DIR/ccc"
 
 # On Windows (Git Bash), also install the .bat launcher
 if $IS_WINDOWS; then
-    cp "$SCRIPT_DIR/bin/cc.bat" "$BIN_DIR/cc.bat"
-    ok "Installed cc.bat -> $BIN_DIR/cc.bat"
+    cp "$SCRIPT_DIR/bin/ccc.bat" "$BIN_DIR/ccc.bat"
+    ok "Installed ccc.bat -> $BIN_DIR/ccc.bat"
+fi
+
+# Clean up the shadowing launcher left by earlier versions of this installer.
+if [[ -f "$BIN_DIR/cc" ]] && grep -q "Claude Code Account Switcher" "$BIN_DIR/cc" 2>/dev/null; then
+    rm -f "$BIN_DIR/cc" "$BIN_DIR/cc.bat"
+    ok "Removed the old 'cc' launcher (it shadowed the system C compiler)"
 fi
 
 # ── Check if BIN_DIR is in PATH ──────────────────────────────
@@ -199,15 +209,15 @@ echo ""
 echo -e "  ${GREEN}${BOLD}Installation complete!${RESET}"
 echo ""
 echo -e "  ${BOLD}Usage:${RESET}"
-echo -e "    ${CYAN}cc${RESET}          Open account picker"
-echo -e "    ${CYAN}cc 1${RESET}        Launch with Account 1 (default)"
-echo -e "    ${CYAN}cc 2${RESET}        Launch with Account 2"
-echo -e "    ${CYAN}cc 2 -c${RESET}     Launch Account 2 in continue mode"
+echo -e "    ${CYAN}ccc${RESET}          Open account picker"
+echo -e "    ${CYAN}ccc 1${RESET}        Launch with Account 1 (default)"
+echo -e "    ${CYAN}ccc 2${RESET}        Launch with Account 2"
+echo -e "    ${CYAN}ccc 2 -c${RESET}     Launch Account 2 in continue mode"
 echo ""
 echo -e "  ${BOLD}Statusline:${RESET}"
 echo -e "    Configured automatically. Your Claude Code sessions"
 echo -e "    will show the account badge and powerline segments."
 echo ""
 echo -e "  ${BOLD}First-time setup for Account 2:${RESET}"
-echo -e "    Run ${CYAN}cc 2${RESET} and log in when prompted."
+echo -e "    Run ${CYAN}ccc 2${RESET} and log in when prompted."
 echo ""

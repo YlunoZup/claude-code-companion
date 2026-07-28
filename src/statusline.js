@@ -22,25 +22,39 @@ try {
 // Detect active account
 const configDir = process.env.CLAUDE_CONFIG_DIR;
 const accountId = configDir ? basename(normalize(configDir)) : "__default__";
-let label;
+const dirName = configDir ? basename(normalize(configDir)) : null;
 
-if (!configDir) {
-  label =
-    "\x1b[48;2;99;66;245m\x1b[38;2;255;255;255m\x1b[1m \u{1F464} Account 1 \x1b[0m\x1b[38;2;99;66;245m\uE0B0\x1b[0m";
-} else {
-  const dirName = basename(normalize(configDir));
-  let name = dirName;
+// Look the name up in config.json for every account, including the default one.
+// No CLAUDE_CONFIG_DIR means the default profile, which is the entry whose
+// configDir is null; it is not necessarily literally named "Account 1".
+let name = dirName;
+try {
+  const config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
+  const acc = Object.values(config.accounts || {}).find((a) =>
+    dirName ? a.configDir === dirName : !a.configDir
+  );
+  if (acc && acc.name) name = acc.name;
+} catch {}
 
+// Fall back to the identity Claude Code recorded when config.json has no entry.
+// The default profile keeps its state in ~/.claude.json (home root); every other
+// profile keeps its own inside the config dir.
+if (!name) {
   try {
-    const config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-    const acc = Object.values(config.accounts).find(
-      (a) => a.configDir === dirName
-    );
-    if (acc) name = acc.name;
+    const statePath = configDir
+      ? join(configDir, ".claude.json")
+      : join(HOME, ".claude.json");
+    const acct = JSON.parse(readFileSync(statePath, "utf8")).oauthAccount || {};
+    name = acct.displayName || acct.emailAddress || null;
   } catch {}
-
-  label = `\x1b[48;2;230;126;34m\x1b[38;2;255;255;255m\x1b[1m \u{1F464} ${name} \x1b[0m\x1b[38;2;230;126;34m\uE0B0\x1b[0m`;
 }
+if (!name) name = "Account 1";
+
+// Purple for the default profile, orange for the others.
+const accentRgb = configDir ? "230;126;34" : "99;66;245";
+const label =
+  `\x1b[48;2;${accentRgb}m\x1b[38;2;255;255;255m\x1b[1m \u{1F464} ${name} \x1b[0m` +
+  `\x1b[38;2;${accentRgb}m\uE0B0\x1b[0m`;
 
 // Invalidate shared today cache when account changes
 try {
