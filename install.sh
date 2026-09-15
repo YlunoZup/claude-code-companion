@@ -13,25 +13,28 @@ DIM='\033[2m'
 BOLD='\033[1m'
 RESET='\033[0m'
 
-info()  { echo -e "  ${CYAN}${BOLD}INFO${RESET}  $1"; }
-ok()    { echo -e "  ${GREEN}${BOLD}  OK${RESET}  $1"; }
-warn()  { echo -e "  ${YELLOW}${BOLD}WARN${RESET}  $1"; }
-err()   { echo -e "  ${RED}${BOLD} ERR${RESET}  $1"; }
+# printf '%s', not echo -e, so a path containing a backslash is reported as it
+# is rather than being read as an escape sequence.
+info() { printf '  %b%bINFO%b  %s\n' "$CYAN" "$BOLD" "$RESET" "$1"; }
+ok()   { printf '  %b%b  OK%b  %s\n' "$GREEN" "$BOLD" "$RESET" "$1"; }
+warn() { printf '  %b%bWARN%b  %s\n' "$YELLOW" "$BOLD" "$RESET" "$1"; }
+err()  { printf '  %b%b ERR%b  %s\n' "$RED" "$BOLD" "$RESET" "$1"; }
 
 # ── Detect environment ───────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROFILES_DIR="$HOME/.claude-profiles"
 ACCOUNT2_DIR="$PROFILES_DIR/account2"
 CLAUDE_DIR="$HOME/.claude"
+PROFILES_LIB="$PROFILES_DIR/profiles.cjs"
 IS_WINDOWS=false
 
-if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "win32" ]]; then
+if [[ "${OSTYPE-}" == "msys" || "${OSTYPE-}" == "cygwin" || "${OSTYPE-}" == "win32" ]]; then
     IS_WINDOWS=true
 fi
 
 echo ""
-echo -e "  ${CYAN}${BOLD}claude-multi-account installer${RESET}"
-echo -e "  ${DIM}────────────────────────────────${RESET}"
+printf '  %b%bclaude-multi-account installer%b\n' "$CYAN" "$BOLD" "$RESET"
+printf '  %b────────────────────────────────%b\n' "$DIM" "$RESET"
 echo ""
 
 # ── Check prerequisites ──────────────────────────────────────
@@ -47,6 +50,26 @@ else
     ok "Claude Code CLI found"
 fi
 
+# ── Resolve the install destination before touching anything ──
+# Doing this first means an unwritable or bogus destination stops the run
+# before settings.json has been rewritten and links have been created.
+BIN_DIR="$HOME/.local/bin"
+if [[ -n "${1-}" ]]; then
+    BIN_DIR="$1"
+fi
+
+if ! mkdir -p "$BIN_DIR" 2>/dev/null; then
+    err "Cannot create the install directory: $BIN_DIR"
+    exit 1
+fi
+# Normalise, so the PATH check below compares like with like and a relative
+# argument is not re-resolved against whatever directory the user runs ccc from.
+BIN_DIR="$(cd "$BIN_DIR" && pwd)"
+if [[ ! -w "$BIN_DIR" ]]; then
+    err "The install directory is not writable: $BIN_DIR"
+    exit 1
+fi
+
 # ── Create directories ───────────────────────────────────────
 info "Creating profile directories..."
 
@@ -54,6 +77,18 @@ mkdir -p "$PROFILES_DIR"
 mkdir -p "$ACCOUNT2_DIR"
 ok "Created $PROFILES_DIR"
 ok "Created $ACCOUNT2_DIR"
+
+# ── Install the shared profile library ───────────────────────
+# Every launcher and installer routes its config.json and settings.json work
+# through this file, so it has to land before anything calls into it.
+info "Installing profile library..."
+cp "$SCRIPT_DIR/src/profiles.cjs" "$PROFILES_LIB"
+ok "Installed profiles.cjs -> $PROFILES_LIB"
+
+# statusline.js is CommonJS with a .js extension. Without this marker an
+# unrelated ~/package.json declaring {"type": "module"} would make Node parse it
+# as ESM and the statusline would die on every refresh.
+printf '{\n  "type": "commonjs"\n}\n' > "$PROFILES_DIR/package.json"
 
 # ── Copy picker.mjs ──────────────────────────────────────────
 info "Installing picker..."
@@ -83,41 +118,32 @@ fi
 # Check for claude-powerline
 if ! command -v claude-powerline &>/dev/null; then
     warn "claude-powerline not found. Install it for statusline segments:"
-    echo -e "    ${BOLD}npm install -g claude-powerline${RESET}"
-    echo ""
+    printf '    %bnpm install -g claude-powerline%b\n\n' "$BOLD" "$RESET"
 else
     ok "claude-powerline found"
 fi
 
 # ── Configure statusline in settings.json ────────────────────
+# profiles.cjs merges the statusLine key and leaves every other key alone. It
+# refuses outright if the file exists but cannot be parsed, rather than
+# replacing a user's theme, permissions and hooks with a one-key object.
 info "Configuring statusline in Claude Code settings..."
 
 configure_statusline() {
     local settings_file="$1"
-    node -e 'const fs = require("fs");
-const p = process.argv[1];
-let s = {};
-try { s = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
-const h = require("os").homedir().replace(/\\/g, "/");
-s.statusLine = { type: "command", command: "node " + h + "/.claude-profiles/statusline.js" };
-fs.writeFileSync(p, JSON.stringify(s, null, 2) + "\n");
-' "$settings_file"
+    local label="$2"
+    mkdir -p "$(dirname "$settings_file")"
+    if node "$PROFILES_LIB" apply-statusline "$settings_file"; then
+        ok "Configured statusline in $label"
+    else
+        warn "Left $label alone — it exists but could not be parsed as JSON"
+    fi
 }
 
-if [[ -f "$CLAUDE_DIR/settings.json" ]]; then
-    configure_statusline "$CLAUDE_DIR/settings.json"
-    ok "Configured statusline in settings.json"
-fi
+configure_statusline "$CLAUDE_DIR/settings.json" "settings.json"
+configure_statusline "$ACCOUNT2_DIR/settings.json" "account2/settings.json"
 
-# Also configure for account2 — create settings.json if it doesn't exist
-mkdir -p "$ACCOUNT2_DIR"
-if [[ ! -f "$ACCOUNT2_DIR/settings.json" ]]; then
-    echo '{}' > "$ACCOUNT2_DIR/settings.json"
-fi
-configure_statusline "$ACCOUNT2_DIR/settings.json"
-ok "Configured statusline in account2/settings.json"
-
-# ── Set up shared data (symlinks from account2 -> ~/.claude) ─
+# ── Set up shared data (account2 -> ~/.claude) ───────────────
 info "Setting up shared data for Account 2..."
 
 # Files/dirs to share between accounts
@@ -132,45 +158,31 @@ for item in "${SHARE_ITEMS[@]}"; do
         continue
     fi
 
-    # Skip if already linked
-    if [[ -L "$dest" ]]; then
-        continue
-    fi
-
-    # Remove existing file/dir at dest before linking
-    if [[ -e "$dest" ]]; then
-        rm -rf "$dest"
-    fi
-
-    if $IS_WINDOWS; then
-        # Windows: use junctions for dirs, hard links for files
-        if [[ -d "$src" ]]; then
-            # Convert to Windows paths for cmd
-            win_src=$(cygpath -w "$src" 2>/dev/null || echo "$src")
-            win_dest=$(cygpath -w "$dest" 2>/dev/null || echo "$dest")
-            cmd //c "mklink /J \"$win_dest\" \"$win_src\"" &>/dev/null && \
-                ok "Junction: $item" || warn "Could not create junction for $item"
-        else
-            ln "$src" "$dest" 2>/dev/null && \
-                ok "Linked: $item" || warn "Could not link $item"
-        fi
-    else
-        ln -s "$src" "$dest" && \
-            ok "Symlink: $item" || warn "Could not symlink $item"
-    fi
+    # profiles.cjs picks the right primitive per platform — a junction on
+    # Windows (no administrator rights needed, and no silent deep copy from Git
+    # Bash's `ln -s`), a symlink everywhere else — and never replaces whatever
+    # is already at the destination.
+    result="$(node "$PROFILES_LIB" ensure-link "$dest" "$src")"
+    case "$result" in
+        linked)
+            ok "Shared: $item"
+            ;;
+        already-linked)
+            ok "Shared: $item (already linked)"
+            ;;
+        exists)
+            # A real directory here holds that account's session transcripts.
+            # Deleting it to make room for a link would destroy them.
+            warn "$item already exists in account2 — leaving it as it is"
+            ;;
+        *)
+            warn "Could not share $item"
+            ;;
+    esac
 done
 
 # ── Install launcher script ──────────────────────────────────
 info "Installing launcher script..."
-
-# Determine install directory
-BIN_DIR="$HOME/.local/bin"
-
-if [[ -n "$1" ]]; then
-    BIN_DIR="$1"
-fi
-
-mkdir -p "$BIN_DIR"
 
 # The launcher is called "ccc", not "cc": on macOS and most Linux distros
 # /usr/bin/cc is the system C compiler, and BIN_DIR is meant to sit early in
@@ -180,7 +192,8 @@ cp "$SCRIPT_DIR/bin/ccc" "$BIN_DIR/ccc"
 chmod +x "$BIN_DIR/ccc"
 ok "Installed ccc -> $BIN_DIR/ccc"
 
-# On Windows (Git Bash), also install the .bat launcher
+# On Windows (Git Bash), also install the .bat launcher so the same install
+# works from a CMD prompt.
 if $IS_WINDOWS; then
     cp "$SCRIPT_DIR/bin/ccc.bat" "$BIN_DIR/ccc.bat"
     ok "Installed ccc.bat -> $BIN_DIR/ccc.bat"
@@ -197,27 +210,28 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
     echo ""
     warn "$BIN_DIR is not in your PATH."
     echo ""
-    echo -e "  Add it to your shell profile:"
+    echo "  Add it to your shell profile:"
     echo ""
-    echo -e "    ${BOLD}export PATH=\"$BIN_DIR:\$PATH\"${RESET}"
+    # shellcheck disable=SC2016  # $PATH stays literal: this is a line to paste
+    printf '    %bexport PATH="%s:$PATH"%b\n' "$BOLD" "$BIN_DIR" "$RESET"
     echo ""
-    echo -e "  Add this line to your ${DIM}~/.bashrc${RESET}, ${DIM}~/.zshrc${RESET}, or ${DIM}~/.profile${RESET}"
+    printf '  Add this line to your %b~/.bashrc%b, %b~/.zshrc%b, or %b~/.profile%b\n' \
+        "$DIM" "$RESET" "$DIM" "$RESET" "$DIM" "$RESET"
 fi
 
 # ── Done ──────────────────────────────────────────────────────
 echo ""
-echo -e "  ${GREEN}${BOLD}Installation complete!${RESET}"
+printf '  %b%bInstallation complete!%b\n\n' "$GREEN" "$BOLD" "$RESET"
+printf '  %bUsage:%b\n' "$BOLD" "$RESET"
+printf '    %bccc%b          Open account picker\n' "$CYAN" "$RESET"
+printf '    %bccc 1%b        Launch with Account 1 (default)\n' "$CYAN" "$RESET"
+printf '    %bccc 2%b        Launch with Account 2\n' "$CYAN" "$RESET"
+printf '    %bccc 2 -c%b     Launch Account 2 in continue mode\n' "$CYAN" "$RESET"
 echo ""
-echo -e "  ${BOLD}Usage:${RESET}"
-echo -e "    ${CYAN}ccc${RESET}          Open account picker"
-echo -e "    ${CYAN}ccc 1${RESET}        Launch with Account 1 (default)"
-echo -e "    ${CYAN}ccc 2${RESET}        Launch with Account 2"
-echo -e "    ${CYAN}ccc 2 -c${RESET}     Launch Account 2 in continue mode"
+printf '  %bStatusline:%b\n' "$BOLD" "$RESET"
+echo "    Configured automatically. Your Claude Code sessions"
+echo "    will show the account badge and powerline segments."
 echo ""
-echo -e "  ${BOLD}Statusline:${RESET}"
-echo -e "    Configured automatically. Your Claude Code sessions"
-echo -e "    will show the account badge and powerline segments."
-echo ""
-echo -e "  ${BOLD}First-time setup for Account 2:${RESET}"
-echo -e "    Run ${CYAN}ccc 2${RESET} and log in when prompted."
+printf '  %bFirst-time setup for Account 2:%b\n' "$BOLD" "$RESET"
+printf '    Run %bccc 2%b and log in when prompted.\n' "$CYAN" "$RESET"
 echo ""

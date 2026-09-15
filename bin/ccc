@@ -8,45 +8,51 @@
 
 PROFILES_DIR="$HOME/.claude-profiles"
 PICKER="$PROFILES_DIR/picker.mjs"
-CONFIG="$PROFILES_DIR/config.json"
+PROFILES_LIB="$PROFILES_DIR/profiles.cjs"
 
-# Every account shares ONE session history: <profile>/projects is a symlink to
-# ~/.claude/projects, so /resume and the memory dir are common to all accounts.
-# A profile that gets created on first login (rather than by `ccc add`) would
-# otherwise end up with its own isolated projects dir, so wire the link before
-# launching. If projects already exists as a real directory it is left alone,
-# never clobbered.
-ensure_shared_projects() {
-    local dir="$1"
-    [[ -z "$dir" ]] && return 0
-    mkdir -p "$dir" 2>/dev/null || return 0
-    if [[ ! -e "$dir/projects" && ! -L "$dir/projects" ]]; then
-        mkdir -p "$HOME/.claude/projects" 2>/dev/null
-        ln -s "$HOME/.claude/projects" "$dir/projects" 2>/dev/null
+die() {
+    printf '  %s\n' "$1" >&2
+    exit 1
+}
+
+# Every path below runs node. Failing here with a sentence beats letting a
+# "command not found" escape from inside a command substitution, which used to
+# leave ccc exiting 0 without ever launching anything.
+require_runtime() {
+    if ! command -v node >/dev/null 2>&1; then
+        die "Node.js is required but was not found in PATH. Install it from https://nodejs.org"
+    fi
+    if [[ ! -f "$PROFILES_LIB" ]]; then
+        die "$PROFILES_LIB is missing. Re-run the installer:  bash install.sh"
     fi
 }
 
+require_claude() {
+    if ! command -v claude >/dev/null 2>&1; then
+        die "claude was not found in PATH. Install Claude Code first: https://docs.anthropic.com/en/docs/claude-code"
+    fi
+}
+
+# Every account shares ONE session history: <profile>/projects is a link to
+# ~/.claude/projects, so /resume and the memory dir are common to all accounts.
+# A profile that gets created on first login (rather than by `ccc add`) would
+# otherwise end up with its own isolated projects dir, so wire the link before
+# launching. Anything already at that path is left alone, never clobbered.
+ensure_shared_projects() {
+    local dir="${1-}"
+    [[ -z "$dir" ]] && return 0
+    node "$PROFILES_LIB" ensure-shared-projects "$dir" >/dev/null 2>&1
+    return 0
+}
+
 # ── ccc add [name] — add a new account ────────────────────────
-if [[ "$1" == "add" ]]; then
+if [[ "${1-}" == "add" ]]; then
     shift
+    require_runtime
     CUSTOM_NAME="$*"
 
-    # Find next account number
-    NEXT=$(node -e "
-        const fs = require('fs');
-        let c = { accounts: {} };
-        try { c = JSON.parse(fs.readFileSync('$CONFIG','utf8')); } catch {}
-        const keys = Object.keys(c.accounts).map(Number).filter(n => !isNaN(n));
-        console.log(Math.max(...keys, 0) + 1);
-    " 2>/dev/null)
-
-    if [[ -z "$NEXT" ]]; then
-        echo "  Error: could not determine next account number."
-        exit 1
-    fi
-
-    DIR_NAME="account$NEXT"
-    ACCT_DIR="$PROFILES_DIR/$DIR_NAME"
+    NEXT=$(node "$PROFILES_LIB" next-account-number) || exit
+    [[ -z "$NEXT" ]] && die "Could not determine the next account number."
 
     # Prompt for name if not provided
     if [[ -z "$CUSTOM_NAME" ]]; then
@@ -54,31 +60,9 @@ if [[ "$1" == "add" ]]; then
         [[ -z "$CUSTOM_NAME" ]] && CUSTOM_NAME="Account $NEXT"
     fi
 
-    # Create directory and settings
-    mkdir -p "$ACCT_DIR"
-
-    # Add to config.json. Values go through the environment, not string
-    # interpolation, so a name containing quotes cannot break the script.
-    CC_CONFIG="$CONFIG" CC_KEY="$NEXT" CC_NAME="$CUSTOM_NAME" CC_DIR="$DIR_NAME" node -e '
-        const fs = require("fs");
-        let c = { accounts: {} };
-        try { c = JSON.parse(fs.readFileSync(process.env.CC_CONFIG, "utf8")); } catch {}
-        c.accounts[process.env.CC_KEY] = {
-            name: process.env.CC_NAME,
-            configDir: process.env.CC_DIR,
-        };
-        fs.writeFileSync(process.env.CC_CONFIG, JSON.stringify(c, null, 2) + "\n");
-    ' 2>/dev/null
-
-    # Create settings.json with statusline
-    node -e "
-        const fs = require('fs');
-        const h = require('os').homedir().replace(/\\\\/g, '/');
-        const s = { statusLine: { type: 'command', command: 'node ' + h + '/.claude-profiles/statusline.js' } };
-        fs.writeFileSync('$ACCT_DIR/settings.json', JSON.stringify(s, null, 2) + '\n');
-    " 2>/dev/null
-
-    ensure_shared_projects "$ACCT_DIR"
+    # The name travels through the environment and the config path never leaves
+    # profiles.cjs, so neither can break out into shell or JavaScript syntax.
+    ACCT_DIR=$(CC_ACCOUNT_NAME="$CUSTOM_NAME" node "$PROFILES_LIB" add-account "$NEXT") || exit
 
     echo ""
     echo "  Account $NEXT added!"
@@ -92,41 +76,34 @@ if [[ "$1" == "add" ]]; then
 fi
 
 # ── ccc <number> — quick-switch ───────────────────────────────
-if [[ "$1" =~ ^-?[0-9]+$ ]]; then
+if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then
     ACCT="${1#-}"
     shift
+    require_runtime
+    require_claude
 
-    # Resolve this slot's config dir from config.json.
-    DIR=""
-    if [[ -f "$CONFIG" ]] && command -v node &>/dev/null; then
-        DIR=$(CC_CONFIG="$CONFIG" CC_KEY="$ACCT" node -e '
-            try {
-                const c = JSON.parse(require("fs").readFileSync(process.env.CC_CONFIG, "utf8"));
-                const a = c.accounts[process.env.CC_KEY];
-                if (a && a.configDir) process.stdout.write(a.configDir);
-                else if (a) process.stdout.write("__DEFAULT__");
-            } catch {}
-        ' 2>/dev/null)
-    fi
+    # config.json decides; with no entry for this slot, slot 1 is the default
+    # profile and anything else follows the accountN naming convention.
+    TARGET=$(node "$PROFILES_LIB" resolve-account "$ACCT") || exit
 
-    # No entry in config.json: slot 1 is the default profile, anything else
-    # falls back to the accountN naming convention.
-    if [[ -z "$DIR" ]]; then
-        if [[ "$ACCT" == "1" ]]; then DIR="__DEFAULT__"; else DIR="account$ACCT"; fi
-    fi
-
-    if [[ "$DIR" == "__DEFAULT__" ]]; then
+    if [[ "$TARGET" == "__DEFAULT__" ]]; then
         unset CLAUDE_CONFIG_DIR
     else
-        export CLAUDE_CONFIG_DIR="$PROFILES_DIR/$DIR"
-        ensure_shared_projects "$CLAUDE_CONFIG_DIR"
+        export CLAUDE_CONFIG_DIR="$TARGET"
+        ensure_shared_projects "$TARGET"
     fi
 
     exec claude "$@"
 fi
 
 # ── ccc — interactive picker ──────────────────────────────────
-profile_path=$(node "$PICKER")
+require_runtime
+require_claude
+if [[ ! -f "$PICKER" ]]; then
+    die "$PICKER is missing. Re-run the installer:  bash install.sh"
+fi
+
+profile_path=$(node "$PICKER") || exit
 
 if [[ -z "$profile_path" ]]; then
     exit 0
