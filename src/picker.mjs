@@ -7,7 +7,7 @@
 //     "Claude Code-credentials-<sha256(dir)[0:8]>"   -> any profile launched
 //                                                        with CLAUDE_CONFIG_DIR
 // where <dir> is the absolute config dir path, e.g.
-//     sha256("/Users/you/.claude-profiles/account2")[0:8] = 29dd1c0e
+//     sha256("/Users/you/.claude-profiles/account2")[0:8] = 04f595a6
 //
 // We probe with an attribute-only lookup (no -w flag), so macOS never shows a
 // Keychain access prompt and the check costs ~10ms.
@@ -18,17 +18,17 @@
 // Plan and identity (email, display name) come from the profile's .claude.json
 // under the "oauthAccount" key, which is plain JSON and needs no Keychain access.
 
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, realpathSync } from "fs";
 import { execFileSync } from "child_process";
-import { createHash } from "crypto";
 import { createInterface } from "readline";
 import { homedir, platform } from "os";
 import { join } from "path";
+import { pathToFileURL } from "url";
+import profiles from "./profiles.cjs";
 
 const HOME = homedir();
 const PROFILES_DIR = join(HOME, ".claude-profiles");
 const CONFIG_PATH = join(PROFILES_DIR, "config.json");
-const KEYCHAIN_SERVICE = "Claude Code-credentials";
 
 // ── Colors & Styles ──────────────────────────────────────────
 const c = {
@@ -48,25 +48,19 @@ const c = {
 };
 
 // ── Load Config ──────────────────────────────────────────────
-let config;
-try {
-  config = JSON.parse(readFileSync(CONFIG_PATH, "utf8"));
-} catch {
-  config = {
-    accounts: {
-      1: { name: "Account 1", configDir: null },
-      2: { name: "Account 2", configDir: "account2" },
-    },
-  };
+// No config.json is the ordinary first-run state and falls back to the built-in
+// pair of accounts. A config.json that exists but cannot be parsed is not: it
+// means the account list on screen would not be the user's, and picking from it
+// would launch the wrong profile. Say so and stop.
+function loadConfig(configPath = CONFIG_PATH) {
+  const result = profiles.readConfig(configPath);
+  if (result.status === "missing") return profiles.defaultConfig();
+  if (result.status === "ok") return result.config;
+  const reason = result.error ? result.error.message : "unknown error";
+  throw new Error(`${configPath} could not be read: ${reason}`);
 }
 
 // ── Credential detection ─────────────────────────────────────
-function keychainService(dir, isDefault) {
-  if (isDefault) return KEYCHAIN_SERVICE;
-  const hash = createHash("sha256").update(dir).digest("hex").slice(0, 8);
-  return `${KEYCHAIN_SERVICE}-${hash}`;
-}
-
 function inKeychain(service) {
   if (platform() !== "darwin") return false;
   try {
@@ -87,7 +81,7 @@ function getAccountInfo(configDir) {
   const dir = isDefault ? join(HOME, ".claude") : join(PROFILES_DIR, configDir);
 
   // 1. Logged in? Keychain first, then the legacy on-disk credentials file.
-  let ready = inKeychain(keychainService(dir, isDefault));
+  let ready = inKeychain(profiles.keychainService(dir, isDefault));
   let sub = null;
   let tier = null;
 
@@ -138,10 +132,19 @@ function formatPlan(info) {
 }
 
 // ── Build Account List ───────────────────────────────────────
-const accounts = Object.entries(config.accounts).map(([key, acc]) => {
-  const info = getAccountInfo(acc.configDir);
-  return { key, name: acc.name, configDir: acc.configDir, ...info };
-});
+function buildAccounts(config) {
+  return Object.entries(config.accounts).map(([key, acc]) => {
+    const entry = acc && typeof acc === "object" ? acc : {};
+    const info = getAccountInfo(entry.configDir);
+    return {
+      key,
+      // A config entry with no name would otherwise render as "undefined".
+      name: entry.name ? String(entry.name) : `Account ${key}`,
+      configDir: entry.configDir,
+      ...info,
+    };
+  });
+}
 
 // ── Write to stderr so shell wrapper can capture stdout for data ──
 const log = (msg = "") => process.stderr.write(msg + "\n");
@@ -158,12 +161,12 @@ function clip(str, max) {
 // ── Render UI ────────────────────────────────────────────────
 const W = 58;
 
-function boxRow(content, l) {
+function boxRow(content) {
   const pad = " ".repeat(Math.max(0, W - stripAnsi(content).length));
   log(`  ${c.dim}${c.cyan}┃${c.reset}${content}${pad}${c.dim}${c.cyan}┃${c.reset}`);
 }
 
-function render() {
+function render(accounts) {
   const line = "━".repeat(W);
   const blank = "";
 
@@ -182,7 +185,7 @@ function render() {
 
     // Row 1: slot number, status dot, configured label.
     boxRow(
-      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${acc.name}${c.reset}`
+      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${clip(acc.name, W - 12)}${c.reset}`
     );
 
     // Row 2: which account this actually is, plus the plan on it.
@@ -204,43 +207,89 @@ function render() {
 }
 
 // ── Prompt ───────────────────────────────────────────────────
-function prompt() {
+function prompt(accounts) {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   const keys = accounts.map((a) => a.key).join("/");
 
-  rl.question(
-    `  ${c.white}${c.bold}Select account ${c.dim}[${keys}, q to quit]${c.reset}${c.white}${c.bold}: ${c.reset}`,
-    (answer) => {
-      rl.close();
-      const choice = answer.trim();
+  const ask = () => {
+    rl.question(
+      `  ${c.white}${c.bold}Select account ${c.dim}[${keys}, q to quit]${c.reset}${c.white}${c.bold}: ${c.reset}`,
+      (answer) => {
+        const choice = answer.trim();
 
-      if (choice === "q" || choice === "Q" || choice === "") {
-        log(`  ${c.dim}Cancelled.${c.reset}`);
-        process.exit(0);
-      }
+        if (choice === "q" || choice === "Q" || choice === "") {
+          rl.close();
+          log(`  ${c.dim}Cancelled.${c.reset}`);
+          process.exit(0);
+        }
 
-      const acc = accounts.find((a) => a.key === choice);
-      if (!acc) {
-        log(`  ${c.yellow}Invalid choice. Enter ${keys} or q to quit.${c.reset}`);
-        prompt();
-        return;
-      }
+        const acc = accounts.find((a) => a.key === choice);
+        if (!acc) {
+          log(`  ${c.yellow}Invalid choice. Enter ${keys} or q to quit.${c.reset}`);
+          ask();
+          return;
+        }
 
-      if (!acc.ready) {
-        log(
-          `\n  ${c.yellow}${acc.name} is not logged in yet; Claude will prompt you to sign in.${c.reset}\n`
-        );
-      }
+        rl.close();
 
-      // stdout: only the profile path (read by shell wrapper)
-      if (acc.configDir) {
-        process.stdout.write(join(PROFILES_DIR, acc.configDir));
-      } else {
-        process.stdout.write("__DEFAULT__");
+        if (!acc.ready) {
+          log(
+            `\n  ${c.yellow}${acc.name} is not logged in yet; Claude will prompt you to sign in.${c.reset}\n`
+          );
+        }
+
+        // stdout: only the profile path (read by shell wrapper)
+        if (acc.configDir) {
+          process.stdout.write(join(PROFILES_DIR, acc.configDir));
+        } else {
+          process.stdout.write("__DEFAULT__");
+        }
       }
-    }
-  );
+    );
+  };
+
+  ask();
 }
 
-render();
-prompt();
+function main() {
+  let accounts;
+  try {
+    accounts = buildAccounts(loadConfig());
+  } catch (err) {
+    log(`  ${c.yellow}${err.message}${c.reset}`);
+    log(`  ${c.dim}Fix it, or delete it to fall back to the defaults.${c.reset}`);
+    process.exit(1);
+  }
+
+  render(accounts);
+  prompt(accounts);
+}
+
+export {
+  buildAccounts,
+  clip,
+  formatPlan,
+  getAccountInfo,
+  loadConfig,
+  main,
+  render,
+  stripAnsi,
+  W,
+};
+
+// Run only when invoked directly, so the helpers above can be imported by
+// tests. Compare real paths: import.meta.url is already symlink-resolved, and
+// argv[1] is whatever the caller typed — on macOS /var vs /private/var alone is
+// enough to make a naive comparison disagree.
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+if (invokedDirectly()) {
+  main();
+}
