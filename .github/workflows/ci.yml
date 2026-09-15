@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Nothing in this workflow touches a real Claude account. There is no
+  # Keychain entry to find, no .credentials.json is ever written, and `claude`
+  # itself is a stub that records its arguments. No secrets are needed, and
+  # none are made available.
+  SHELLCHECK_VERSION: v0.11.0
+
+jobs:
+  lint:
+    name: Shell lint and line endings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than using the preinstalled binary: ubuntu-latest ships
+      # 0.9.0 today and a newer one whenever the image rolls, which would change
+      # the rule set under us without a commit.
+      - name: Install shellcheck ${{ env.SHELLCHECK_VERSION }}
+        run: |
+          curl -fsSL "https://github.com/koalaman/shellcheck/releases/download/${SHELLCHECK_VERSION}/shellcheck-${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+            | sudo tar -xJ --strip-components=1 -C /usr/local/bin "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
+          shellcheck --version
+
+      - name: shellcheck
+        run: shellcheck install.sh bin/ccc
+
+      - name: bash -n
+        run: |
+          bash -n install.sh
+          bash -n bin/ccc
+
+      # A lone \r in a bash script is fatal on Linux and macOS, and Git for
+      # Windows defaults to core.autocrlf=true. .gitattributes is what prevents
+      # it; this is what proves .gitattributes is still doing its job.
+      - name: Line endings
+        run: |
+          fail=0
+          for f in install.sh bin/ccc src/profiles.cjs src/picker.mjs src/statusline.js; do
+            if grep -qU $'\r' "$f"; then echo "::error file=$f::contains CR"; fail=1; fi
+          done
+          for f in install.bat bin/ccc.bat; do
+            if ! grep -qU $'\r' "$f"; then echo "::error file=$f::should be CRLF"; fail=1; fi
+          done
+          exit $fail
+
+  test:
+    name: ${{ matrix.os }} / node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # 18 is the floor the README promises; 22 and 24 are the live releases
+        # and are preinstalled in every runner's toolcache.
+        node: ['18', '22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Node and platform
+        run: node --version && node -p "process.platform + ' ' + process.arch"
+
+      # On windows-latest this runs the whole suite through Git Bash, which is
+      # the only way to reach install.sh's MSYS branch. The Windows CMD suite
+      # (test/windows.test.mjs) runs in the same job and skips elsewhere.
+      - name: Test
+        run: node --test
+
+  gitbash:
+    name: Windows / Git Bash installer
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # Deliberately not setting MSYS=winsymlinks:nativestrict. The default
+      # deepcopy behaviour is what real users get, and overriding it here would
+      # hide the thing this job exists to observe.
+      - name: install.sh under Git Bash
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          mkdir -p "$HOME"
+          bash install.sh "$HOME/bin"
+
+          test -f "$HOME/.claude-profiles/profiles.cjs"
+          test -f "$HOME/.claude-profiles/picker.mjs"
+          test -f "$HOME/.claude-profiles/statusline.js"
+          test -f "$HOME/bin/ccc"
+          echo "installed OK"
+
+      - name: The shared projects link resolves
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          node "$HOME/.claude-profiles/profiles.cjs" ensure-shared-projects "$HOME/.claude-profiles/account2"
+          echo marker > "$HOME/.claude/projects/marker.txt"
+          test -f "$HOME/.claude-profiles/account2/projects/marker.txt"
+          echo "junction resolves OK"
+
+      - name: The generated statusline command is usable
+        shell: bash
+        run: |
+          set -euo pipefail
+          export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          node -e '
+            const fs = require("fs");
+            const p = process.env.HOME + "/.claude-profiles/account2/settings.json";
+            const cmd = JSON.parse(fs.readFileSync(p, "utf8")).statusLine.command;
+            if (!/^node "/.test(cmd)) { console.error("unquoted path: " + cmd); process.exit(1); }
+            console.log("statusLine command OK: " + cmd);
+          '
