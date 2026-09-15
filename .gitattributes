@@ -1,0 +1,14 @@
+# Keep line endings correct per platform. A CRLF in a bash script is fatal on
+# Linux and macOS ("$'\r': command not found"), and Git for Windows defaults to
+# core.autocrlf=true, so without this a Windows clone cannot run install.sh.
+* text=auto eol=lf
+
+*.sh      text eol=lf
+bin/ccc   text eol=lf
+*.mjs     text eol=lf
+*.cjs     text eol=lf
+*.js      text eol=lf
+*.json    text eol=lf
+
+# cmd.exe is the one thing that genuinely wants CRLF.
+*.bat     text eol=crlf
