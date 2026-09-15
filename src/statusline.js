@@ -79,7 +79,12 @@ function runPowerline(input, configPath, platform) {
   const args = ["--style=powerline"];
   if (configPath) args.push("--config", configPath);
 
-  const opts = { input, encoding: "utf8", timeout: 5000, stdio: ["pipe", "pipe", "pipe"] };
+  // Bounded so a slow or wedged claude-powerline cannot stall the statusline.
+  // Overridable because "slow" depends on the machine and on how much history
+  // there is to scan — a loaded CI box or a large transcript can legitimately
+  // need longer than the default.
+  const timeout = Number(process.env.CCC_POWERLINE_TIMEOUT_MS) || 5000;
+  const opts = { input, encoding: "utf8", timeout, stdio: ["pipe", "pipe", "pipe"] };
 
   if ((platform || process.platform) === "win32") {
     // npm installs claude-powerline as a .cmd shim, which cannot be run without

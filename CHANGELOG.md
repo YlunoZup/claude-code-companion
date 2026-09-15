@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer change what runs.
 - The installer resolves and checks the install destination before it changes
   anything, so a bad argument no longer aborts halfway through.
+- The claude-powerline timeout is overridable with `CCC_POWERLINE_TIMEOUT_MS`. It
+  was hardcoded at 5 seconds, which a loaded machine or a large transcript history
+  can legitimately exceed — and when it does, the segments silently vanish.
 - Documentation: the Keychain service example hash was wrong; "How It Works" claimed
   `settings.json` is shared when it deliberately is not; the uninstall steps did not
   mention that macOS Keychain entries survive `rm -rf ~/.claude-profiles`.

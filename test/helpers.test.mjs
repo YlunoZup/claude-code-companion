@@ -58,6 +58,10 @@ export function makeSandbox(opts = {}) {
     USERPROFILE: home,
     PATH: pathParts.join(delimiter),
     CCC_TEST_CALLS: calls,
+    // Test files run in parallel, so spawning the stub can take longer than
+    // the production default. Without this the statusline tests are flaky
+    // under load rather than wrong.
+    CCC_POWERLINE_TIMEOUT_MS: "60000",
   };
   // A developer running the suite inside Claude Code has this set; leaking it
   // into a child would silently rewrite what every test observes.
@@ -133,6 +137,10 @@ function writeStub(dir, name, logPath, extraOutput) {
   if (IS_WINDOWS) {
     const lines = [
       "@echo off",
+      // Drain stdin first: the real claude-powerline reads the JSON Claude Code
+      // pipes in, and a stub that exits without reading it makes the parent's
+      // write fail with EPIPE.
+      "more > nul 2>&1",
       `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
       ...(extraOutput ? [`echo ${extraOutput}`] : []),
       "exit /b 0",
@@ -143,6 +151,10 @@ function writeStub(dir, name, logPath, extraOutput) {
 
   const script = [
     "#!/bin/sh",
+    // Drain stdin first: the real claude-powerline reads the JSON Claude Code
+    // pipes in, and a stub that exits without reading it makes the parent's
+    // write fail with EPIPE.
+    "cat > /dev/null 2>&1",
     `printf '%s cfg=[%s] args=[%s]\\n' "${name}" "\${CLAUDE_CONFIG_DIR-<unset>}" "$*" >> "${logPath}"`,
     ...(extraOutput ? [`echo "${extraOutput}"`] : []),
     "exit 0",

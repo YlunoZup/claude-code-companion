@@ -12,9 +12,14 @@ import { makeSandbox, REPO_ROOT, IS_WINDOWS } from "./helpers.test.mjs";
 const require = createRequire(import.meta.url);
 const statusline = require(join(REPO_ROOT, "src", "statusline.js"));
 
-/** Run the statusline as Claude Code does: JSON on stdin. */
+/**
+ * Run the statusline as Claude Code does: JSON on stdin.
+ * Debug is on so a failed assertion reports why, not just that.
+ */
 function runStatusline(sb, configDir) {
-  return sb.node("src/statusline.js", [], configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}, "{}\n");
+  const env = { CCC_STATUSLINE_DEBUG: "1" };
+  if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
+  return sb.node("src/statusline.js", [], env, "{}\n");
 }
 
 /** The claude-powerline invocation the stub recorded. */
@@ -149,7 +154,7 @@ describe("end to end", () => {
       assert.equal(r.status, 0, r.stderr);
       assert.match(r.stdout, /Personal/);
       assert.match(r.stdout, /99;66;245/);
-      assert.match(r.stdout, /POWERLINE-OK/);
+      assert.match(r.stdout, /POWERLINE-OK/, `stderr: ${r.stderr}`);
     } finally {
       sb.cleanup();
     }
@@ -178,6 +183,17 @@ describe("end to end", () => {
 
       assert.equal(r.status, 0, "a missing optional dependency must not break the statusline");
       assert.match(r.stdout, /Personal/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("stays quiet about failures unless debug is asked for", () => {
+    const sb = makeSandbox({ powerline: false });
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
+      const r = sb.node("src/statusline.js", [], {}, "{}\n");
+      assert.equal(r.stderr, "", "a missing claude-powerline must not print anything");
     } finally {
       sb.cleanup();
     }

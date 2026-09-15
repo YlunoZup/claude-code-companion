@@ -225,6 +225,11 @@ The statusline is a Node.js script (`statusline.js`) that Claude Code runs as an
 3. **Powerline rendering** — Pipes stdin through `claude-powerline --config` to render the configured segments (git, model, session cost, context usage, etc.)
 4. **Output** — Concatenates the colored account badge with the powerline output
 
+If claude-powerline produces nothing you get the account badge on its own. Run
+`CCC_STATUSLINE_DEBUG=1 node ~/.claude-profiles/statusline.js < /dev/null` to see why.
+claude-powerline is given 5 seconds to respond; set `CCC_POWERLINE_TIMEOUT_MS` if your
+machine or transcript history needs longer.
+
 The cache invalidation step is critical because all accounts share the same `~/.claude/powerline/usage/` directory. Without it, switching from Account 1 to Account 2 would show Account 1's cached daily cost.
 
 ## Shared Data
