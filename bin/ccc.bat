@@ -1,120 +1,117 @@
 @echo off
+:: Claude Code Account Switcher (Windows CMD)
+:: Usage: ccc [args...]    - launches claude with account picker
+::        ccc N [args...]  - launches directly with Account N
+::        ccc add [name]   - add a new account
+::
+:: Everything that touches config.json or settings.json goes through
+:: profiles.cjs. Nothing on this page embeds JavaScript source, which is what
+:: used to make `!` inside a node -e snippet get eaten by delayed expansion.
+
 setlocal enabledelayedexpansion
 
 set "PROFILES_DIR=%USERPROFILE%\.claude-profiles"
-set "CONFIG=%PROFILES_DIR%\config.json"
+set "PROFILES_LIB=%PROFILES_DIR%\profiles.cjs"
+set "PICKER=%PROFILES_DIR%\picker.mjs"
+
+where node >nul 2>nul
+if errorlevel 1 (
+    echo   Node.js is required but was not found in PATH. Install it from https://nodejs.org
+    exit /b 1
+)
+if not exist "%PROFILES_LIB%" (
+    echo   %PROFILES_LIB% is missing. Re-run the installer:  install.bat
+    exit /b 1
+)
+
 set "ARG1=%~1"
 
+:: Everything after the first argument, forwarded to claude verbatim. The old
+:: "%1 %2 ... %9" form silently dropped everything past the ninth.
+set "REST="
+for /f "tokens=1,*" %%a in ("%*") do set "REST=%%b"
+
+if /i "%ARG1%"=="add" goto :add
+
+echo %ARG1%| findstr /r "^-*[0-9][0-9]*$" >nul 2>nul
+if errorlevel 1 goto :picker
+goto :quickswitch
+
 :: ── ccc add [name] — add a new account ─────────────────────
-if /i "%ARG1%"=="add" (
-    shift
-    set "CUSTOM_NAME=%~2 %~3 %~4 %~5"
-    :: Trim trailing spaces
-    for /f "tokens=*" %%a in ("!CUSTOM_NAME!") do set "CUSTOM_NAME=%%a"
+:add
+set "CUSTOM_NAME=%REST%"
 
-    :: Find next account number
-    for /f "delims=" %%n in ('node -e "var fs=require('fs');var c={accounts:{}};try{c=JSON.parse(fs.readFileSync('%CONFIG:\=/%','utf8'))}catch(e){}var k=Object.keys(c.accounts).map(Number).filter(function(n){return !isNaN(n)});console.log(Math.max.apply(null,k.concat([0]))+1)" 2^>nul') do set "NEXT=%%n"
-
-    if not defined NEXT (
-        echo   Error: could not determine next account number.
-        exit /b 1
-    )
-
-    set "DIR_NAME=account!NEXT!"
-    set "ACCT_DIR=%PROFILES_DIR%\!DIR_NAME!"
-
-    :: Prompt for name if not provided
-    if "!CUSTOM_NAME!"=="" (
-        set /p "CUSTOM_NAME=  Account name [Account !NEXT!]: "
-        if "!CUSTOM_NAME!"=="" set "CUSTOM_NAME=Account !NEXT!"
-    )
-
-    :: Create directory
-    if not exist "!ACCT_DIR!" mkdir "!ACCT_DIR!"
-
-    :: Add to config.json. The name goes through the environment rather than
-    :: string interpolation, so a name containing quotes cannot break the script.
-    set "CC_CONFIG=%CONFIG:\=/%"
-    set "CC_KEY=!NEXT!"
-    set "CC_NAME=!CUSTOM_NAME!"
-    set "CC_DIR=!DIR_NAME!"
-    node -e "var fs=require('fs');var c={accounts:{}};try{c=JSON.parse(fs.readFileSync(process.env.CC_CONFIG,'utf8'))}catch(e){}c.accounts[process.env.CC_KEY]={name:process.env.CC_NAME,configDir:process.env.CC_DIR};fs.writeFileSync(process.env.CC_CONFIG,JSON.stringify(c,null,2)+'\n')" 2>nul
-
-    :: Create settings.json with statusline
-    node -e "var fs=require('fs'),h=require('os').homedir().replace(/\\/g,'/');var s={statusLine:{type:'command',command:'node '+h+'/.claude-profiles/statusline.js'}};fs.writeFileSync('!ACCT_DIR:\=/!/settings.json',JSON.stringify(s,null,2)+'\n')" 2>nul
-
-    :: Share one session history with the default profile, the same way the
-    :: installer does. Without this the new account gets an isolated history and
-    :: /resume cannot see sessions started on the other accounts.
-    if not exist "!ACCT_DIR!\projects" (
-        if not exist "%USERPROFILE%\.claude\projects" mkdir "%USERPROFILE%\.claude\projects"
-        mklink /J "!ACCT_DIR!\projects" "%USERPROFILE%\.claude\projects" >nul 2>nul
-    )
-
-    echo.
-    echo   Account !NEXT! added!
-    echo.
-    echo   Name:      !CUSTOM_NAME!
-    echo   Directory:  !ACCT_DIR!
-    echo.
-    echo   Run "ccc !NEXT!" to log in and start using it.
-    echo.
-    exit /b 0
+for /f "delims=" %%n in ('node "%PROFILES_LIB%" next-account-number') do set "NEXT=%%n"
+if not defined NEXT (
+    echo   Error: could not determine the next account number.
+    exit /b 1
 )
+
+if not defined CUSTOM_NAME set /p "CUSTOM_NAME=  Account name [Account !NEXT!]: "
+if not defined CUSTOM_NAME set "CUSTOM_NAME=Account !NEXT!"
+
+:: The name travels through the environment, so quotes in it cannot break
+:: anything, and the config path never leaves profiles.cjs.
+set "CC_ACCOUNT_NAME=!CUSTOM_NAME!"
+for /f "delims=" %%d in ('node "%PROFILES_LIB%" add-account !NEXT!') do set "ACCT_DIR=%%d"
+if not defined ACCT_DIR (
+    echo   Error: could not create the account. config.json was left unchanged.
+    exit /b 1
+)
+
+echo.
+echo   Account !NEXT! added!
+echo.
+echo   Name:      !CUSTOM_NAME!
+echo   Directory:  !ACCT_DIR!
+echo.
+echo   Run "ccc !NEXT!" to log in and start using it.
+echo.
+exit /b 0
 
 :: ── ccc ^<number^> — quick-switch ────────────────────────────
-echo %ARG1%| findstr /r "^-*[0-9][0-9]*$" >nul 2>nul
-if %ERRORLEVEL% equ 0 goto quickswitch
-goto picker
-
 :quickswitch
 set "ACCT=%ARG1:-=%"
-shift
 
-if "%ACCT%"=="1" (
-    endlocal
-    set "CLAUDE_CONFIG_DIR="
-    claude %1 %2 %3 %4 %5 %6 %7 %8 %9
-    goto :eof
+:: config.json decides which slot is the default profile — the same rule the
+:: bash launcher follows. Slot 1 is not hardcoded here any more.
+for /f "delims=" %%d in ('node "%PROFILES_LIB%" resolve-account !ACCT!') do set "TARGET=%%d"
+if not defined TARGET (
+    echo   Error: could not resolve account !ACCT!.
+    exit /b 1
 )
 
-:: Look up configDir from config.json
-for /f "delims=" %%d in ('node -e "try{var c=JSON.parse(require('fs').readFileSync('%CONFIG:\=/%','utf8'));var a=c.accounts['%ACCT%'];if(a&&a.configDir)process.stdout.write(a.configDir);else if(a)process.stdout.write('__DEFAULT__')}catch{}" 2^>nul') do set "CFGDIR=%%d"
+call :launch "!TARGET!" "!REST!"
+exit /b !ERRORLEVEL!
 
-if "%CFGDIR%"=="__DEFAULT__" (
-    endlocal
-    set "CLAUDE_CONFIG_DIR="
-    claude %1 %2 %3 %4 %5 %6 %7 %8 %9
-    goto :eof
-)
-
-if not "%CFGDIR%"=="" (
-    if not exist "%USERPROFILE%\.claude-profiles\%CFGDIR%" mkdir "%USERPROFILE%\.claude-profiles\%CFGDIR%" >nul 2>nul
-    if not exist "%USERPROFILE%\.claude-profiles\%CFGDIR%\projects" mklink /J "%USERPROFILE%\.claude-profiles\%CFGDIR%\projects" "%USERPROFILE%\.claude\projects" >nul 2>nul
-    endlocal
-    set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-profiles\%CFGDIR%"
-    claude %1 %2 %3 %4 %5 %6 %7 %8 %9
-    goto :eof
-)
-
-:: Fallback: assume accountN directory
-if not exist "%USERPROFILE%\.claude-profiles\account%ACCT%" mkdir "%USERPROFILE%\.claude-profiles\account%ACCT%" >nul 2>nul
-if not exist "%USERPROFILE%\.claude-profiles\account%ACCT%\projects" mklink /J "%USERPROFILE%\.claude-profiles\account%ACCT%\projects" "%USERPROFILE%\.claude\projects" >nul 2>nul
-endlocal
-set "CLAUDE_CONFIG_DIR=%USERPROFILE%\.claude-profiles\account%ACCT%"
-claude %1 %2 %3 %4 %5 %6 %7 %8 %9
-goto :eof
-
+:: ── ccc — interactive picker ────────────────────────────────
 :picker
-for /f "delims=" %%i in ('node "%PROFILES_DIR%\picker.mjs"') do set "PROFILE_PATH=%%i"
-if "%PROFILE_PATH%"=="" goto :eof
-if "%PROFILE_PATH%"=="__DEFAULT__" (
-    endlocal
+if not exist "%PICKER%" (
+    echo   %PICKER% is missing. Re-run the installer:  install.bat
+    exit /b 1
+)
+
+for /f "delims=" %%i in ('node "%PICKER%"') do set "PROFILE_PATH=%%i"
+if not defined PROFILE_PATH exit /b 0
+
+call :launch "!PROFILE_PATH!" "%*"
+exit /b !ERRORLEVEL!
+
+:: ── Launch claude with the right profile ────────────────────
+:: CLAUDE_CONFIG_DIR is set inside this setlocal scope and claude is called from
+:: inside it too, so the child sees it and the caller's CMD session does not
+:: keep it afterwards. The old code ran endlocal *before* the set, which leaked
+:: the variable into the calling session and rebound every later bare `claude`.
+:launch
+set "TARGET_DIR=%~1"
+set "LAUNCH_ARGS=%~2"
+
+if "%TARGET_DIR%"=="__DEFAULT__" (
     set "CLAUDE_CONFIG_DIR="
 ) else (
-    if not exist "%PROFILE_PATH%" mkdir "%PROFILE_PATH%" >nul 2>nul
-    if not exist "%PROFILE_PATH%\projects" mklink /J "%PROFILE_PATH%\projects" "%USERPROFILE%\.claude\projects" >nul 2>nul
-    endlocal
-    set "CLAUDE_CONFIG_DIR=%PROFILE_PATH%"
+    node "%PROFILES_LIB%" ensure-shared-projects "%TARGET_DIR%" >nul 2>nul
+    set "CLAUDE_CONFIG_DIR=%TARGET_DIR%"
 )
-claude %*
+
+call claude %LAUNCH_ARGS%
+exit /b %ERRORLEVEL%
