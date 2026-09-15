@@ -53,7 +53,8 @@ Claude Code uses the `CLAUDE_CONFIG_DIR` environment variable to determine where
 
 - **Account 1** uses the default `~/.claude` directory
 - **Account 2+** use isolated directories under `~/.claude-profiles/`
-- Shared data (projects, todos, settings) is symlinked so all accounts see the same workspace
+- Shared data (projects, todos) is linked so all accounts see the same workspace
+- `settings.json` is deliberately **not** shared: each account keeps its own, so each gets its own statusline
 - Each account authenticates independently
 
 The launcher is called `ccc`, not `cc`, because `/usr/bin/cc` is the system C compiler on macOS and most Linux distros. Installing a `cc` into a directory early in `PATH` would shadow it and break anything that shells out to the compiler.
@@ -66,6 +67,8 @@ On **macOS**, Claude Code stores OAuth credentials in the login Keychain rather 
 |---------|------------------|
 | Default (`~/.claude`, no `CLAUDE_CONFIG_DIR`) | `Claude Code-credentials` |
 | Any other profile | `Claude Code-credentials-<sha256(absolute config dir)[0:8]>` |
+
+For example, `sha256("/Users/you/.claude-profiles/account2")[0:8]` is `04f595a6`, giving `Claude Code-credentials-04f595a6`.
 
 The picker detects a logged-in account with `security find-generic-password -s "<service>"` and deliberately **no** `-w` flag. An attribute-only lookup confirms the entry exists without reading the secret, so macOS never shows a Keychain permission prompt and the check costs about 10 ms.
 
@@ -232,7 +235,7 @@ The installer creates symlinks so all accounts share:
 |------|---------|
 | `projects/` | Project-specific settings and memory |
 | `todos/` | Todo lists |
-| `statsig/` | Analytics/feature flags |
+| `statsig/`, `.statsig/` | Analytics/feature flags |
 
 **Not shared** (per-account):
 - Credentials — each account has its own login (Keychain entry on macOS, `.credentials.json` elsewhere)
@@ -255,8 +258,11 @@ claude-multi-account/
 │   ├── ccc                     # Bash launcher script
 │   └── ccc.bat                 # Windows CMD launcher script
 ├── src/
+│   ├── profiles.cjs            # Shared profile/config logic (also a small CLI)
 │   ├── picker.mjs              # Interactive account picker UI
 │   └── statusline.js           # Statusline script (account badge + powerline)
+├── test/                       # Test suite (node --test, no dependencies)
+├── .github/workflows/ci.yml    # Cross-platform CI
 ├── config/
 │   └── claude-powerline.json   # Default powerline segment configuration
 └── config.example.json         # Example account configuration
@@ -265,12 +271,45 @@ claude-multi-account/
 ## Uninstall
 
 ```bash
-rm ~/.local/bin/ccc
+rm ~/.local/bin/ccc          # or wherever you installed it
 rm ~/.local/bin/ccc.bat      # Windows only
-rm -rf ~/.claude-profiles   # Removes all profiles, config, and account2 credentials
+rm -rf ~/.claude-profiles    # Removes all profiles and config
 ```
 
-To remove the statusline, delete the `statusLine` key from `~/.claude/settings.json`.
+Remove the statusline by deleting the `statusLine` key from `~/.claude/settings.json`
+**before** you delete `~/.claude-profiles`, or Claude Code will keep trying to run a
+script that is no longer there.
+
+On macOS, deleting `~/.claude-profiles` does **not** remove the accounts' logins:
+those live in the login Keychain. Delete the `Claude Code-credentials-*` entries in
+Keychain Access if you want them gone.
+
+## Development
+
+The test suite uses Node's built-in runner and has no dependencies:
+
+```bash
+npm test          # or: node --test
+```
+
+It runs the real `install.sh`, `bin/ccc`, `install.bat` and `bin/ccc.bat` against a
+throwaway `HOME` with a stub `claude` on `PATH` that records `CLAUDE_CONFIG_DIR` and
+its arguments instead of launching anything. **No test touches the macOS Keychain, a
+real Claude account, or your actual `~/.claude`** — a profile with no credentials is
+exactly the state every test starts from.
+
+The Windows CMD suite (`test/windows.test.mjs`) skips on other platforms.
+
+[CI](.github/workflows/ci.yml) runs on Ubuntu, macOS and Windows against Node 18, 22
+and 24, plus a `shellcheck` and line-ending gate and a Git Bash installer job. Note
+that a GitHub Windows runner is an administrator with UAC disabled, so a green
+Windows job does not prove the tool degrades gracefully for a standard user with
+Developer Mode off.
+
+If you change anything the shell or batch scripts rely on, put the logic in
+`src/profiles.cjs` rather than a `node -e` snippet. Paths and names reach it as
+argv entries or environment values, so a home directory containing a space or a
+quote cannot change what runs — and the logic stays testable.
 
 ## License
 
