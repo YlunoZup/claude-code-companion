@@ -280,6 +280,61 @@ describe("ccc.bat add", { skip }, () => {
   });
 });
 
+// The rule the bash launcher follows: a profile that never had a statusLine, or
+// lost it, gets one on launch, and anybody else's statusLine is left alone.
+describe("ccc.bat wires the statusline on launch", { skip }, () => {
+  function installed() {
+    const sb = makeSandbox();
+    assert.equal(cmd(sb, join(REPO_ROOT, "install.bat")).status, 0);
+    return { sb, ccc: join(sb.home, ".local", "bin", "ccc.bat") };
+  }
+
+  test("a statusLine that went missing is put back", () => {
+    const { sb, ccc } = installed();
+    try {
+      const file = join(sb.profilesDir, "account2", "settings.json");
+      sb.writeJson(file, { theme: "dark" });
+
+      cmd(sb, ccc, ["2"]);
+
+      const settings = sb.readJson(file);
+      assert.equal(settings.theme, "dark");
+      assert.match(settings.statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("the default profile is covered as well", () => {
+    const { sb, ccc } = installed();
+    try {
+      const file = join(sb.claudeDir, "settings.json");
+      sb.writeJson(file, { model: "opus" });
+
+      cmd(sb, ccc, ["1"]);
+
+      assert.match(sb.readJson(file).statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("somebody else's statusline is left exactly as it is", () => {
+    const { sb, ccc } = installed();
+    try {
+      const file = join(sb.profilesDir, "account2", "settings.json");
+      sb.writeJson(file, { statusLine: { type: "command", command: "npx -y ccstatusline@latest" } });
+      const before = readFileSync(file, "utf8");
+
+      cmd(sb, ccc, ["2"]);
+
+      assert.equal(readFileSync(file, "utf8"), before);
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
 describe("ccc.bat missing dependencies", { skip }, () => {
   test("a missing profiles.cjs points at the installer", () => {
     const sb = makeSandbox();

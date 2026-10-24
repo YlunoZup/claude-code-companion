@@ -185,6 +185,104 @@ function applyStatusLine(settingsPath, profilesDir, platform) {
   return { status: existing.status === "missing" ? "created" : "updated", settings };
 }
 
+// Split a command line into words the way the shell running it would, for the
+// one purpose of finding a script path inside it. Quotes group; on POSIX a
+// backslash escapes, while to cmd.exe it is a path separator and a single
+// quote is an ordinary character. A word the shell would expand — ~, $VAR,
+// `cmd`, %VAR% — is flagged, because its real value cannot be known here.
+function shellWords(command, platform) {
+  const isWindows = (platform || process.platform) === "win32";
+  const words = [];
+  let word = null; // { text, expands } inside a word, null between words
+  let quote = null;
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    const next = command[i + 1];
+
+    if (!quote && /\s/.test(ch)) {
+      word = null;
+      continue;
+    }
+    if (!word) words.push((word = { text: "", expands: false }));
+
+    if (isWindows) {
+      // Only double quotes group, and %VAR% expands inside them as well.
+      if (ch === '"') quote = quote ? null : ch;
+      else {
+        if (ch === "%") word.expands = true;
+        word.text += ch;
+      }
+    } else if (quote === "'") {
+      if (ch === "'") quote = null;
+      else word.text += ch;
+    } else if (ch === "\\" && next !== undefined && (!quote || '"\\$`'.includes(next))) {
+      // Inside double quotes a backslash escapes only these four, which are
+      // exactly the ones quoteForShell escapes.
+      word.text += next;
+      i++;
+    } else if (ch === '"' || (ch === "'" && !quote)) {
+      quote = quote ? null : ch;
+    } else {
+      if (ch === "$" || ch === "`" || (ch === "~" && !quote && word.text === "")) word.expands = true;
+      word.text += ch;
+    }
+  }
+  return words;
+}
+
+// The .claude-profiles script a statusLine command runs, or null when it runs
+// something else. A path only the shell could finish — ~, $HOME, %USERPROFILE%
+// — also gives null: if we cannot tell whether the script exists, we must not
+// decide that it is gone.
+function statusLineScript(command, platform) {
+  const isWindows = (platform || process.platform) === "win32";
+  const script = shellWords(command, platform).find((w) =>
+    /\.claude-profiles[\\/].+\.[cm]?js$/i.test(w.text)
+  );
+  if (!script || script.expands) return null;
+  return (isWindows ? path.win32 : path.posix).isAbsolute(script.text) ? script.text : null;
+}
+
+// Make sure a profile's settings.json runs the statusline, without overriding
+// a choice the user made. The launchers call this on every launch, because a
+// profile created by logging in for the first time — rather than by `ccc add`
+// — never gets the key and silently shows no statusline.
+//
+//   no settings.json, or no statusLine key in it  -> ours is added
+//   a .claude-profiles script that is gone        -> repointed at ours;
+//     renaming or consolidating the statusline scripts leaves exactly this
+//   anything else                                 -> left alone
+//
+// Like applyStatusLine, it never writes over a file it could not read.
+function ensureStatusLine(settingsPath, profilesDir, platform) {
+  const existing = readJsonFile(settingsPath);
+  if (existing.status === "unreadable" || existing.status === "invalid") {
+    return { status: existing.status, error: existing.error };
+  }
+
+  const settings = existing.status === "missing" ? {} : existing.value;
+  const current = settings.statusLine;
+  let status = existing.status === "missing" ? "created" : "added";
+
+  if (current) {
+    if (current.type !== "command" || typeof current.command !== "string") {
+      return { status: "custom" };
+    }
+    const script = statusLineScript(current.command, platform);
+    if (!script) return { status: "custom" };
+    if (fs.existsSync(script)) return { status: "current" };
+    status = "repointed";
+  }
+
+  settings.statusLine = {
+    type: "command",
+    command: statusLineCommand(profilesDir, platform),
+  };
+  writeJsonAtomic(settingsPath, settings);
+  return { status, settings };
+}
+
 // ── Shared session history ───────────────────────────────────
 
 // Every account shares one session history: <profile>/projects points at
@@ -292,6 +390,7 @@ const USAGE = `usage: profiles.cjs <command> [args]
   resolve-account <slot>           print __DEFAULT__ or the profile directory
   add-account <slot>               create a profile (name from CC_ACCOUNT_NAME)
   apply-statusline <settings.json> merge the statusLine key into a settings file
+  ensure-statusline <settings.json> add the statusLine key unless one is set
   ensure-shared-projects <dir>     link <dir>/projects at ~/.claude/projects
   ensure-link <link> <target>      link <link> at <target>, never replacing
   statusline-command               print the configured statusLine command`;
@@ -355,6 +454,14 @@ function main(argv) {
       return 0;
     }
 
+    case "ensure-statusline": {
+      if (!rest[0]) return usage();
+      // Runs on every launch, and a profile without a statusline still works,
+      // so this never fails the caller — it just reports what happened.
+      process.stdout.write(ensureStatusLine(rest[0], p.profiles).status);
+      return 0;
+    }
+
     case "ensure-shared-projects": {
       if (!rest[0]) return usage();
       const result = ensureSharedProjects(rest[0], p.claude);
@@ -395,6 +502,8 @@ module.exports = {
   quoteForShell,
   statusLineCommand,
   applyStatusLine,
+  statusLineScript,
+  ensureStatusLine,
   ensureLink,
   ensureSharedProjects,
   keychainService,

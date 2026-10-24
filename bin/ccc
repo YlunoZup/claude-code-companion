@@ -45,6 +45,16 @@ ensure_shared_projects() {
     return 0
 }
 
+# One statusline.js serves every account, but each profile opts in through its
+# own settings.json. A profile created by logging in for the first time (rather
+# than by `ccc add`) never gets that key and silently shows no statusline, so
+# wire it before launching. A statusLine that runs something else is left alone,
+# and so is a settings.json that does not parse.
+ensure_statusline() {
+    node "$PROFILES_LIB" ensure-statusline "$1/settings.json" >/dev/null 2>&1
+    return 0
+}
+
 # ── ccc add [name] — add a new account ────────────────────────
 if [[ "${1-}" == "add" ]]; then
     shift
@@ -88,9 +98,11 @@ if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then
 
     if [[ "$TARGET" == "__DEFAULT__" ]]; then
         unset CLAUDE_CONFIG_DIR
+        ensure_statusline "$HOME/.claude"
     else
         export CLAUDE_CONFIG_DIR="$TARGET"
         ensure_shared_projects "$TARGET"
+        ensure_statusline "$TARGET"
     fi
 
     exec claude "$@"
@@ -111,9 +123,11 @@ fi
 
 if [[ "$profile_path" == "__DEFAULT__" ]]; then
     unset CLAUDE_CONFIG_DIR
+    ensure_statusline "$HOME/.claude"
 else
     export CLAUDE_CONFIG_DIR="$profile_path"
     ensure_shared_projects "$profile_path"
+    ensure_statusline "$profile_path"
 fi
 
 exec claude "$@"

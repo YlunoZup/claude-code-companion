@@ -347,6 +347,89 @@ describe("missing dependencies", () => {
   });
 });
 
+describe("the statusline is wired on every launch", () => {
+  const settingsOf = (sb, dir) => join(dir || sb.claudeDir, "settings.json");
+
+  // A profile created by logging in, rather than by `ccc add`, used to get no
+  // statusline at all.
+  test("a profile launched for the first time gets one", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.ccc(["7"]);
+      const settings = sb.readJson(settingsOf(sb, join(sb.profilesDir, "account7")));
+      assert.match(settings.statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a statusLine that went missing is put back, through the picker too", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const file = settingsOf(sb, join(sb.profilesDir, "account2"));
+      sb.writeJson(file, { theme: "dark" });
+
+      sb.ccc([], { input: "2\n" });
+
+      const settings = sb.readJson(file);
+      assert.equal(settings.theme, "dark");
+      assert.match(settings.statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("the default profile is covered as well", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.writeJson(settingsOf(sb), { model: "opus" });
+
+      sb.ccc(["1"]);
+
+      assert.match(sb.readJson(settingsOf(sb)).statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("somebody else's statusline is left exactly as it is", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const file = settingsOf(sb, join(sb.profilesDir, "account2"));
+      sb.writeJson(file, { statusLine: { type: "command", command: "npx -y ccstatusline@latest" } });
+      const before = readFileSync(file, "utf8");
+
+      sb.ccc(["2"]);
+
+      assert.equal(readFileSync(file, "utf8"), before);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a settings.json that does not parse is never rewritten", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const file = settingsOf(sb, join(sb.profilesDir, "account2"));
+      const original = '{ "theme": "dark", }';
+      writeFileSync(file, original);
+
+      const r = sb.ccc(["2"]);
+
+      assert.equal(r.status, 0, "a bad settings.json must not stop the launch");
+      assert.equal(readFileSync(file, "utf8"), original);
+      assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account2"));
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
 describe("shared session history", () => {
   test("an existing real projects directory in a profile is never replaced", () => {
     const sb = makeSandbox();

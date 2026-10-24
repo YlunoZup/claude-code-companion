@@ -254,6 +254,182 @@ describe("applyStatusLine", () => {
   });
 });
 
+describe("statusLineScript", () => {
+  test("finds the script in the quoted form statusLineCommand writes", () => {
+    const cmd = profiles.statusLineCommand("/Users/John Smith/.claude-profiles", "darwin");
+    assert.equal(
+      profiles.statusLineScript(cmd, "darwin"),
+      "/Users/John Smith/.claude-profiles/statusline.js"
+    );
+  });
+
+  test("finds it in the bare form earlier versions wrote", () => {
+    assert.equal(
+      profiles.statusLineScript("node /Users/me/.claude-profiles/statusline.js", "darwin"),
+      "/Users/me/.claude-profiles/statusline.js"
+    );
+  });
+
+  test("undoes the escaping quoteForShell applies on POSIX", () => {
+    const dir = '/home/a$b`c"d/.claude-profiles';
+    const cmd = profiles.statusLineCommand(dir, "linux");
+    assert.equal(profiles.statusLineScript(cmd, "linux"), `${dir}/statusline.js`);
+
+    // An escaped backslash, which the shell reads as a single one.
+    assert.equal(
+      profiles.statusLineScript('node "/home/x\\\\y/.claude-profiles/statusline.js"', "linux"),
+      "/home/x\\y/.claude-profiles/statusline.js"
+    );
+  });
+
+  test("single quotes group on POSIX", () => {
+    assert.equal(
+      profiles.statusLineScript("node '/Users/it is me/.claude-profiles/old.mjs' --flag", "darwin"),
+      "/Users/it is me/.claude-profiles/old.mjs"
+    );
+  });
+
+  test("Windows: the forward-slash form statusLineCommand writes", () => {
+    const cmd = profiles.statusLineCommand("C:\\Users\\John Smith\\.claude-profiles", "win32");
+    assert.equal(
+      profiles.statusLineScript(cmd, "win32"),
+      "C:/Users/John Smith/.claude-profiles/statusline.js"
+    );
+  });
+
+  // To cmd.exe a backslash is a path separator, not an escape character.
+  test("Windows: backslashes survive as path separators", () => {
+    assert.equal(
+      profiles.statusLineScript('node "C:\\Users\\me\\.claude-profiles\\statusline.js"', "win32"),
+      "C:\\Users\\me\\.claude-profiles\\statusline.js"
+    );
+  });
+
+  test("a command that runs something else is not ours", () => {
+    assert.equal(profiles.statusLineScript("npx -y ccstatusline@latest", "darwin"), null);
+    assert.equal(profiles.statusLineScript("node /Users/me/.claude/statusline.js", "darwin"), null);
+  });
+
+  // If we cannot tell whether the script exists, we must never decide it is
+  // gone and overwrite the user's choice.
+  test("a path only the shell could finish is not ours to judge", () => {
+    for (const cmd of [
+      "node ~/.claude-profiles/statusline.js",
+      "node $HOME/.claude-profiles/statusline.js",
+      'node "${HOME}/.claude-profiles/statusline.js"',
+      "node relative/.claude-profiles/statusline.js",
+    ]) {
+      assert.equal(profiles.statusLineScript(cmd, "darwin"), null, cmd);
+    }
+    assert.equal(
+      profiles.statusLineScript('node "%USERPROFILE%\\.claude-profiles\\statusline.js"', "win32"),
+      null
+    );
+  });
+});
+
+describe("ensureStatusLine", () => {
+  // The file plus a statusline.js for "ours" to point at.
+  function setup(sb, settings) {
+    mkdirSync(sb.profilesDir, { recursive: true });
+    writeFileSync(join(sb.profilesDir, "statusline.js"), "");
+    const file = join(sb.profilesDir, "account2", "settings.json");
+    if (settings !== undefined) sb.writeJson(file, settings);
+    return file;
+  }
+
+  test("creates settings.json when there is none", () => {
+    const sb = makeSandbox();
+    try {
+      const file = setup(sb);
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "created");
+      assert.match(sb.readJson(file).statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  // A profile created by logging in for the first time has a settings.json
+  // that Claude Code wrote, with no statusLine key in it.
+  test("adds the key to a settings.json that has none, keeping every other key", () => {
+    const sb = makeSandbox();
+    try {
+      const file = setup(sb, { theme: "dark", permissions: { allow: ["Read"] } });
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "added");
+
+      const after = sb.readJson(file);
+      assert.equal(after.theme, "dark");
+      assert.deepEqual(after.permissions, { allow: ["Read"] });
+      assert.equal(after.statusLine.command, profiles.statusLineCommand(sb.profilesDir));
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("leaves a statusLine that already runs ours untouched", () => {
+    const sb = makeSandbox();
+    try {
+      // The unquoted form an earlier version wrote still counts.
+      const command = `node ${join(sb.profilesDir, "statusline.js")}`;
+      const file = setup(sb, { statusLine: { type: "command", command } });
+      const before = readFileSync(file, "utf8");
+
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "current");
+      assert.equal(readFileSync(file, "utf8"), before, "must not be rewritten");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("leaves somebody else's statusline alone", () => {
+    const sb = makeSandbox();
+    try {
+      for (const statusLine of [
+        { type: "command", command: "npx -y ccstatusline@latest" },
+        { type: "static", text: "hello" },
+      ]) {
+        const file = setup(sb, { statusLine });
+        const before = readFileSync(file, "utf8");
+        assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "custom");
+        assert.equal(readFileSync(file, "utf8"), before);
+      }
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  // What renaming or consolidating the statusline scripts leaves behind.
+  test("repoints a statusLine whose .claude-profiles script is gone", () => {
+    const sb = makeSandbox();
+    try {
+      const stale = profiles.statusLineCommand(sb.profilesDir).replace("statusline.js", "old.js");
+      const file = setup(sb, { theme: "dark", statusLine: { type: "command", command: stale } });
+
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "repointed");
+      const after = sb.readJson(file);
+      assert.equal(after.statusLine.command, profiles.statusLineCommand(sb.profilesDir));
+      assert.equal(after.theme, "dark");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("never writes over a settings.json it could not parse", () => {
+    const sb = makeSandbox();
+    try {
+      const file = setup(sb);
+      mkdirSync(join(sb.profilesDir, "account2"), { recursive: true });
+      const original = '{ "theme": "dark", // a comment\n }';
+      writeFileSync(file, original);
+
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "invalid");
+      assert.equal(readFileSync(file, "utf8"), original);
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
 describe("writeJsonAtomic", () => {
   test("leaves no temp file behind", () => {
     const sb = makeSandbox();

@@ -102,14 +102,20 @@ exit /b !ERRORLEVEL!
 :: inside it too, so the child sees it and the caller's CMD session does not
 :: keep it afterwards. The old code ran endlocal *before* the set, which leaked
 :: the variable into the calling session and rebound every later bare `claude`.
+::
+:: Each profile also gets its statusLine wired before launch, as in the bash
+:: launcher: a profile created by logging in for the first time never gets one.
+:: Comments stay out of the block below, where cmd.exe misreads them.
 :launch
 set "TARGET_DIR=%~1"
 set "LAUNCH_ARGS=%~2"
 
 if "%TARGET_DIR%"=="__DEFAULT__" (
     set "CLAUDE_CONFIG_DIR="
+    node "%PROFILES_LIB%" ensure-statusline "%USERPROFILE%\.claude\settings.json" >nul 2>nul
 ) else (
     node "%PROFILES_LIB%" ensure-shared-projects "%TARGET_DIR%" >nul 2>nul
+    node "%PROFILES_LIB%" ensure-statusline "%TARGET_DIR%\settings.json" >nul 2>nul
     set "CLAUDE_CONFIG_DIR=%TARGET_DIR%"
 )
 

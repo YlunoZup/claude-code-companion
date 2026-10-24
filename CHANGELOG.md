@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A `{"type": "commonjs"}` marker in `~/.claude-profiles/`, so an unrelated
   `~/package.json` declaring `{"type": "module"}` can no longer stop the statusline
   from loading.
+- Both launchers wire the statusline on every launch. A profile created by logging
+  in for the first time, rather than with `ccc add`, used to get no statusline at
+  all, and one whose `statusLine` still pointed at a `.claude-profiles` script that
+  no longer exists showed nothing. A `statusLine` that runs anything else is left
+  alone, and so is a `settings.json` that does not parse.
 
 ### Fixed
 

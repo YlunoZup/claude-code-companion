@@ -216,6 +216,8 @@ This automatically:
 
 Then run `ccc N` to log in with the new account. The picker will show it immediately.
 
+`ccc add` is not the only way in: logging into a new slot with `ccc N` works too. `ccc` checks each profile's `settings.json` on every launch and adds the statusline when it is missing, so a profile created that way still gets one. A `statusLine` that runs something else is left alone.
+
 ## How the Statusline Works
 
 The statusline is a Node.js script (`statusline.js`) that Claude Code runs as an external command. On each refresh:
