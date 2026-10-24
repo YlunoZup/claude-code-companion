@@ -1,8 +1,9 @@
 // statusline.js - the Claude Code status line, for every account
 //
-// Renders: account · model · git branch · working directory · context usage,
-// using nothing beyond Node itself. Which account is active comes from
-// CLAUDE_CONFIG_DIR, which ccc exports before launching Claude Code.
+// Renders: account · model · git branch · working directory · context usage ·
+// how much of the 5-hour and weekly limits is left, using nothing beyond Node
+// itself. Which account is active comes from CLAUDE_CONFIG_DIR, which ccc
+// exports before launching Claude Code.
 //
 // CommonJS on purpose, and it keeps the .js extension because existing
 // settings.json files point at this exact filename. The installer drops a
@@ -14,6 +15,7 @@ const { readFileSync } = require("fs");
 const { homedir } = require("os");
 const { join, basename, normalize } = require("path");
 const profiles = require("./profiles.cjs");
+const usage = require("./usage.cjs");
 
 const HOME = homedir();
 const PROFILES_DIR = join(HOME, ".claude-profiles");
@@ -36,6 +38,12 @@ const fg = ([r, g, b]) => `\x1b[38;2;${r};${g};${b}m`;
 const bg = ([r, g, b]) => `\x1b[48;2;${r};${g};${b}m`;
 
 const WHITE = [255, 255, 255];
+
+// How full something is: plenty, getting there, nearly out.
+const GREEN = [80, 200, 120];
+const AMBER = [240, 190, 50];
+const RED = [240, 80, 80];
+
 const COLORS = {
   account: [99, 66, 245], // purple
   model: [30, 130, 180], // teal
@@ -133,8 +141,38 @@ function contextLabel(ctx) {
 
   const pct = Math.round(used);
   const tokens = Math.round((pct / 100) * size);
-  const color = pct < 50 ? [80, 200, 120] : pct < 80 ? [240, 190, 50] : [240, 80, 80];
+  const color = pct < 50 ? GREEN : pct < 80 ? AMBER : RED;
   return `${DIM}ctx${RESET} ${fg(color)}${BOLD}${formatTokens(tokens)}/${formatTokens(size)} (${pct}%)${RESET}`;
+}
+
+// ── Plan limits ──────────────────────────────────────────────
+
+// "5h 77% left · week 40% left": how much of the account's 5-hour and weekly
+// limits is left, from the rate_limits Claude Code passes in for a
+// subscription login — the figures the picker shows. Nothing for an API key,
+// or before a session's first response. A window with under a fifth left also
+// says when it resets, since that is when it matters. Colours run as in the
+// picker: green from half left, amber from a fifth, red below.
+function limitsLabel(limits, now = Date.now()) {
+  if (!limits || typeof limits !== "object") return "";
+  const parts = [];
+  for (const [key, label] of [
+    ["five_hour", "5h"],
+    ["seven_day", "week"],
+  ]) {
+    const win = limits[key];
+    if (!win || typeof win.used_percentage !== "number") continue;
+    const left = Math.round(100 - Math.min(100, Math.max(0, win.used_percentage)));
+    const color = left >= 50 ? GREEN : left >= 20 ? AMBER : RED;
+    let text = `${DIM}${label}${RESET} ${fg(color)}${BOLD}${left}% left${RESET}`;
+    // resets_at is in seconds here, where the usage endpoint gives a date.
+    if (left < 20 && typeof win.resets_at === "number") {
+      const when = usage.formatResetIn(win.resets_at * 1000, now);
+      if (when) text += `${DIM}, resets ${when}${RESET}`;
+    }
+    parts.push(text);
+  }
+  return parts.join(`${DIM} · ${RESET}`);
 }
 
 // ── Rendering ────────────────────────────────────────────────
@@ -154,7 +192,7 @@ function renderSegments(segments) {
 
 // The whole line for one refresh, from the session JSON Claude Code pipes in
 // and the active profile directory.
-function render(session, configDir, { home = HOME, configPath = CONFIG_PATH } = {}) {
+function render(session, configDir, { home = HOME, configPath = CONFIG_PATH, now = Date.now() } = {}) {
   const data = session && typeof session === "object" ? session : {};
   const cwd = (data.workspace && data.workspace.current_dir) || "";
   const model = data.model && data.model.display_name;
@@ -167,7 +205,8 @@ function render(session, configDir, { home = HOME, configPath = CONFIG_PATH } = 
   if (dir) segments.push({ text: dir, color: COLORS.dir });
 
   const context = contextLabel(data.context_window);
-  return renderSegments(segments) + (context ? "  " + context : "");
+  const limits = limitsLabel(data.rate_limits, now);
+  return renderSegments(segments) + (context ? "  " + context : "") + (limits ? "  " + limits : "");
 }
 
 // ── Entry point ──────────────────────────────────────────────
@@ -195,6 +234,7 @@ module.exports = {
   gitBranch,
   shortenDir,
   contextLabel,
+  limitsLabel,
   renderSegments,
   render,
   main,

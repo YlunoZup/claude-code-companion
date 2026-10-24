@@ -332,3 +332,68 @@ describe("end to end", () => {
     }
   });
 });
+
+describe("limitsLabel", () => {
+  const MINUTE = 60000;
+  const HOUR = 60 * MINUTE;
+  const now = Date.UTC(2026, 9, 24, 12, 0, 0);
+  // Claude Code gives resets_at in seconds, where the usage endpoint gives a date.
+  const seconds = (ms) => Math.floor(ms / 1000);
+  const window = (used, resetsInMs = 3 * HOUR) => ({ used_percentage: used, resets_at: seconds(now + resetsInMs) });
+
+  test("shows how much of each window is left", () => {
+    const label = statusline.limitsLabel({ five_hour: window(23), seven_day: window(60, 96 * HOUR) }, now);
+    assert.equal(stripAnsi(label), "5h 77% left · week 40% left");
+  });
+
+  test("a window with under a fifth left also says when it resets", () => {
+    const label = statusline.limitsLabel({ five_hour: window(85, 72 * MINUTE), seven_day: window(10) }, now);
+    assert.equal(stripAnsi(label), "5h 15% left, resets in 1h 12m · week 90% left");
+  });
+
+  test("green from half left, amber from a fifth, red below", () => {
+    const colorOf = (used) => statusline.limitsLabel({ seven_day: window(used) }, now);
+    assert.match(colorOf(50), /38;2;80;200;120m/, "50% left is green");
+    assert.match(colorOf(51), /38;2;240;190;50m/, "49% left is amber");
+    assert.match(colorOf(80), /38;2;240;190;50m/, "20% left is amber");
+    assert.match(colorOf(81), /38;2;240;80;80m/, "19% left is red");
+  });
+
+  // Claude Code drops a window once its reset time has passed, until the
+  // next response reports a new one.
+  test("a window Claude Code did not pass in is left out", () => {
+    assert.equal(stripAnsi(statusline.limitsLabel({ seven_day: window(60) }, now)), "week 40% left");
+  });
+
+  test("nothing for an API key, or before the first response", () => {
+    for (const limits of [undefined, null, {}, "nonsense", { five_hour: {} }]) {
+      assert.equal(statusline.limitsLabel(limits, now), "", JSON.stringify(limits));
+    }
+  });
+
+  test("percentages outside 0-100 are clamped", () => {
+    assert.equal(stripAnsi(statusline.limitsLabel({ five_hour: window(104) }, now)), "5h 0% left, resets in 3h 0m");
+    assert.equal(stripAnsi(statusline.limitsLabel({ five_hour: window(-3) }, now)), "5h 100% left");
+  });
+
+  test("the line ends with the limits when Claude Code passes them in", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
+      const now = Date.now();
+      const r = runStatusline(
+        sb,
+        session(sb.home, {
+          rate_limits: {
+            five_hour: { used_percentage: 23, resets_at: Math.floor((now + 3 * HOUR) / 1000) },
+            seven_day: { used_percentage: 60, resets_at: Math.floor((now + 96 * HOUR) / 1000) },
+          },
+        })
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(stripAnsi(r.stdout), " Personal  Opus 4.1  ~   ctx 74k/200k (37%)  5h 77% left · week 40% left\n");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});

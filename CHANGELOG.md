@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refreshes an expired one under its own locks, so even an account unused for a
   day shows live numbers. `r` in the picker asks again; `CCC_NO_USAGE=1` leaves
   usage out.
+- The statusline shows how much of the account's 5-hour and weekly limits is
+  left, from the rate limits Claude Code passes it, so at no extra request. A
+  window with under a fifth left also says when it resets.
 - The picker shows which Claude account each slot is signed into, and flags a
   slot signed into the same account as an earlier one (`same login as [n]`),
   since the two share its limits.

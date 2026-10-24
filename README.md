@@ -4,10 +4,10 @@ Multi-account switching and an account-aware statusline for [Claude Code](https:
 
 ## Statusline
 
-The statusline appears at the bottom of every Claude Code session and shows which account you are in, next to what the session is doing:
+The statusline appears at the bottom of every Claude Code session and shows which account you are in, what the session is doing, and how much of the account's limits is left:
 
 ```
- Account 1 (Personal)  Opus 4.1   main  ~/code/claude-multi-account   ctx 74k/200k (37%)
+ Account 1 (Personal)  Opus 4.1   main  ~/code/claude-multi-account   ctx 74k/200k (37%)  5h 77% left · week 40% left
 ```
 
 | Segment | What it shows |
@@ -17,6 +17,7 @@ The statusline appears at the bottom of every Claude Code session and shows whic
 | **Git** | The current branch; hidden outside a repository and on a detached HEAD |
 | **Directory** | The working directory: `~` for home, and only the last two components of anything deeper |
 | **Context** | Context window usage: green below 50%, amber below 80%, red from there |
+| **Limits** | How much of the account's 5-hour and weekly limits is left — the figures the picker shows, which Claude Code passes in. Under a fifth left, it also says when that window resets. Absent for an API key, and until the session's first response |
 
 Each segment is white text on its own colour block, so the account is readable at a glance — no need to check config or environment variables. The statusline is a single Node script with no dependencies, so there is nothing else to install.
 
@@ -226,7 +227,7 @@ Then run `ccc login N` to sign the new account in. The picker will show it immed
 The statusline is a Node.js script (`statusline.js`) that Claude Code runs as an external command, piping it a JSON description of the session. On each refresh it:
 
 1. **Resolves the account** — reads `CLAUDE_CONFIG_DIR` to tell which profile is active, then looks its name up in `config.json`, falling back to the identity Claude Code recorded for that profile
-2. **Reads the session** — the model, working directory and context window usage come straight from the JSON Claude Code pipes in
+2. **Reads the session** — the model, working directory, context window usage and plan limits come straight from the JSON Claude Code pipes in, so showing the limits costs no extra request
 3. **Asks git for the branch** — `git rev-parse --abbrev-ref HEAD` in the working directory, given one second; set `CCC_GIT_TIMEOUT_MS` if a large repository or a network drive needs longer
 4. **Prints one line** of coloured segments
 
