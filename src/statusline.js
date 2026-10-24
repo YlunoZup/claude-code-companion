@@ -1,9 +1,10 @@
 // statusline.js - the Claude Code status line, for every account
 //
 // Renders: account · model · git branch · working directory · context usage ·
-// how much of the 5-hour and weekly limits is left, using nothing beyond Node
-// itself. Which account is active comes from CLAUDE_CONFIG_DIR, which ccc
-// exports before launching Claude Code.
+// how much of the 5-hour and weekly limits is left — or, on a GPT model, that
+// the ChatGPT plan is paying — using nothing beyond Node itself. Which account
+// is active comes from CLAUDE_CONFIG_DIR, which ccc exports before launching
+// Claude Code.
 //
 // CommonJS on purpose, and it keeps the .js extension because existing
 // settings.json files point at this exact filename. The installer drops a
@@ -175,6 +176,22 @@ function limitsLabel(limits, now = Date.now()) {
   return parts.join(`${DIM} · ${RESET}`);
 }
 
+// ── GPT models ───────────────────────────────────────────────
+
+// Whether the session is on one of the GPT models ccc's router serves: one the
+// ChatGPT sign-in last listed, or a name only OpenAI uses.
+function isGptModel(id, { home = HOME } = {}) {
+  const bare = String(id || "").replace(/\[\d+m\]$/i, "");
+  if (!bare) return false;
+  if (/^(gpt-|o\d|codex-)/i.test(bare)) return true;
+  const cached = profiles.readJsonFile(join(home, ".claude-profiles", "chatgpt", "models.json"));
+  return cached.status === "ok" && Array.isArray(cached.value.models) && cached.value.models.some((m) => m && m.id === bare);
+}
+
+// A GPT model runs on the ChatGPT plan, so the Claude account's limits say
+// nothing about it; say which plan pays instead.
+const CHATGPT_PLAN_LABEL = `${DIM}Using ChatGPT plan${RESET}`;
+
 // ── Rendering ────────────────────────────────────────────────
 
 // White bold text on each segment's colour. The separator after a segment is
@@ -205,7 +222,7 @@ function render(session, configDir, { home = HOME, configPath = CONFIG_PATH, now
   if (dir) segments.push({ text: dir, color: COLORS.dir });
 
   const context = contextLabel(data.context_window);
-  const limits = limitsLabel(data.rate_limits, now);
+  const limits = isGptModel(data.model && data.model.id, { home }) ? CHATGPT_PLAN_LABEL : limitsLabel(data.rate_limits, now);
   return renderSegments(segments) + (context ? "  " + context : "") + (limits ? "  " + limits : "");
 }
 
@@ -235,6 +252,7 @@ module.exports = {
   shortenDir,
   contextLabel,
   limitsLabel,
+  isGptModel,
   renderSegments,
   render,
   main,

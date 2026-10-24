@@ -1,15 +1,19 @@
 #!/bin/bash
 # Claude Code Account Switcher
-# Usage: ccc [args...]    - pick an account (who it is signed in as, live usage)
-#        ccc N [args...]  - launch directly with Account N
-#        ccc help         - every command: list, add, login, logout, rename,
-#                           remove, repair
+# Usage: ccc [args...]        - pick an account (who it is signed in as, live usage)
+#        ccc N [args...]      - launch directly with Account N
+#        ccc N --gpt [args]   - the same, with the GPT models added to /model
+#        ccc gpt login        - sign in with ChatGPT, for the GPT models
+#        ccc help             - every command: list, add, login, logout, rename,
+#                               remove, repair, gpt
 #
 # Named "ccc", not "cc", because /usr/bin/cc is the C compiler on macOS.
 
 PROFILES_DIR="$HOME/.claude-profiles"
 PICKER="$PROFILES_DIR/picker.mjs"
 PROFILES_LIB="$PROFILES_DIR/profiles.cjs"
+CHATGPT_LIB="$PROFILES_DIR/chatgpt.cjs"
+ROUTER="$PROFILES_DIR/router.cjs"
 
 die() {
     printf '  %s\n' "$1" >&2
@@ -37,6 +41,12 @@ require_claude() {
 require_picker() {
     if [[ ! -f "$PICKER" ]]; then
         die "$PICKER is missing. Re-run the installer:  bash install.sh"
+    fi
+}
+
+require_gpt_runtime() {
+    if [[ ! -f "$CHATGPT_LIB" || ! -f "$ROUTER" ]]; then
+        die "The GPT support files are missing from $PROFILES_DIR. Re-run the installer:  bash install.sh"
     fi
 }
 
@@ -70,8 +80,8 @@ ensure_statusline() {
 }
 
 # Point CLAUDE_CONFIG_DIR at a profile — unset for the default one — with the
-# profile wired up before anything runs in it. Takes what resolve-account and
-# the picker print: a profile directory, or __DEFAULT__.
+# profile wired up before anything runs in it. Takes what resolve-account
+# prints: a profile directory, or __DEFAULT__.
 use_profile() {
     if [[ "$1" == "__DEFAULT__" ]]; then
         unset CLAUDE_CONFIG_DIR
@@ -87,6 +97,28 @@ use_profile() {
 # profile and anything else follows the accountN naming convention.
 resolve_slot() {
     node "$PROFILES_LIB" resolve-account "${1#-}"
+}
+
+# Start an account. Plain Claude Code, unless the GPT models are wanted: the
+# ChatGPT account always, any other account when --gpt is among the arguments
+# or `ccc gpt on` set it. Those start through router.cjs, which stays running
+# beside Claude Code for as long as it does.
+launch() {
+    local slot="$1"
+    shift
+    local args=() want_gpt=() arg target mode
+    for arg in "$@"; do
+        if [[ "$arg" == "--gpt" ]]; then want_gpt=(--gpt); else args+=("$arg"); fi
+    done
+
+    target=$(resolve_slot "$slot") || exit
+    mode=$(node "$PROFILES_LIB" launch-mode "${slot#-}" "${want_gpt[@]}") || exit
+    use_profile "$target"
+    if [[ "$mode" == claude ]]; then
+        exec claude "${args[@]}"
+    fi
+    require_gpt_runtime
+    exec node "$ROUTER" launch --mode "$mode" -- "${args[@]}"
 }
 
 case "${1-}" in
@@ -161,7 +193,8 @@ case "${1-}" in
         exec node "$PROFILES_LIB" repair
         ;;
 
-    # ── ccc login|logout <n> — Claude Code's own sign-in, for that slot
+    # ── ccc login|logout <n> — that slot's own sign-in ──────────
+    # Claude Code's for a Claude account; ChatGPT's for the ChatGPT account.
     login | relogin | logout)
         ACTION=login
         [[ "$1" == logout ]] && ACTION=logout
@@ -169,11 +202,30 @@ case "${1-}" in
         SLOT="$2"
         shift 2
         require_runtime
-        require_claude
 
+        MODE=$(node "$PROFILES_LIB" launch-mode "${SLOT#-}") || exit
+        if [[ "$MODE" == gpt ]]; then
+            require_gpt_runtime
+            exec node "$CHATGPT_LIB" "$ACTION" "$@"
+        fi
+        require_claude
         TARGET=$(resolve_slot "$SLOT") || exit
         use_profile "$TARGET"
         exec claude auth "$ACTION" "$@"
+        ;;
+
+    # ── ccc gpt … — the GPT models, on your ChatGPT plan ────────
+    gpt)
+        shift
+        require_runtime
+        require_gpt_runtime
+        case "${1-}" in
+            on | off)
+                require_slot "gpt $1" "${2-}"
+                exec node "$PROFILES_LIB" set-gpt "${2#-}" "$1"
+                ;;
+        esac
+        exec node "$CHATGPT_LIB" "$@"
         ;;
 esac
 
@@ -183,10 +235,7 @@ if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then
     shift
     require_runtime
     require_claude
-
-    TARGET=$(resolve_slot "$ACCT") || exit
-    use_profile "$TARGET"
-    exec claude "$@"
+    launch "$ACCT" "$@"
 fi
 
 # ── ccc — interactive picker ──────────────────────────────────
@@ -194,11 +243,10 @@ require_runtime
 require_claude
 require_picker
 
-profile_path=$(node "$PICKER") || exit
+SLOT=$(node "$PICKER") || exit
 
-if [[ -z "$profile_path" ]]; then
+if [[ -z "$SLOT" ]]; then
     exit 0
 fi
 
-use_profile "$profile_path"
-exec claude "$@"
+launch "$SLOT" "$@"

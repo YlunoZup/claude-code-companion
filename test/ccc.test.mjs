@@ -667,3 +667,132 @@ describe("ccc repair", () => {
     }
   });
 });
+
+// ── The GPT models ───────────────────────────────────────────
+
+describe("ccc and the GPT models", () => {
+  let sb;
+  const chatgptDir = () => join(sb.profilesDir, "chatgpt");
+  // cmd.exe hands a .cmd stub its arguments still quoted.
+  const plain = (args) => args.replace(/"/g, "");
+
+  before(() => {
+    sb = makeSandbox();
+    const r = sb.install();
+    assert.equal(r.status, 0, r.stderr);
+    const config = sb.readJson(sb.configPath);
+    config.accounts["6"] = { name: "ChatGPT", configDir: "account6", provider: "chatgpt" };
+    sb.writeJson(sb.configPath, config);
+  });
+  after(() => sb.cleanup());
+
+  function signIn() {
+    sb.writeJson(join(chatgptDir(), "auth.json"), {
+      client_id: "oaiapp_test",
+      account: { email: "me@example.com" },
+      access_token: "a",
+      refresh_token: "r",
+      scope: "openid chatgpt.tokens.use.direct",
+      plan_usage: true,
+      expires_at: Date.now() + 3600000,
+    });
+    // A fresh list, so launching needs no network.
+    sb.writeJson(join(chatgptDir(), "models.json"), { fetchedAt: Date.now(), models: [{ id: "gpt-6.1-sol", name: "GPT-6.1-Sol", efforts: [] }] });
+  }
+  function signOut() {
+    rmSync(chatgptDir(), { recursive: true, force: true });
+  }
+
+  test("ccc gpt status, signed out, says how to sign in", () => {
+    signOut();
+    const r = sb.ccc(["gpt", "status"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /not signed in\. Run: ccc gpt login/);
+  });
+
+  test("ccc gpt with nothing after it prints its help", () => {
+    const r = sb.ccc(["gpt"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /usage: ccc gpt <command>/);
+  });
+
+  test("ccc gpt on|off <n> sets whether a Claude account always gets the GPT models", () => {
+    let r = sb.ccc(["gpt", "on", "2"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(sb.readJson(sb.configPath).accounts["2"].gpt, true);
+    r = sb.ccc(["gpt", "off", "2"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(sb.readJson(sb.configPath).accounts["2"].gpt, undefined);
+    r = sb.ccc(["gpt", "on"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Usage: ccc gpt on <number>/);
+  });
+
+  test("logging the ChatGPT account out goes to ChatGPT, not Claude Code", () => {
+    signOut();
+    const before = sb.calls().length;
+    const r = sb.ccc(["logout", "6"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ChatGPT was not signed in/);
+    assert.equal(sb.calls().length, before, "claude auth must not run for it");
+  });
+
+  test("the ChatGPT account will not start signed out", () => {
+    signOut();
+    const before = sb.calls().length;
+    const r = sb.ccc(["6"]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /ccc gpt login/);
+    assert.equal(sb.calls().length, before);
+  });
+
+  test("the ChatGPT account starts Claude Code through the router, in its own profile", () => {
+    signIn();
+    const r = sb.ccc(["6", "-c"]);
+    assert.equal(r.status, 0, r.stderr);
+    const call = lastCall(sb);
+    assert.equal(call.configDir, join(sb.profilesDir, "account6"));
+    assert.match(plain(call.args), /^--settings \S+\.json -c$/);
+  });
+
+  test("--gpt adds the GPT models to a Claude account for one launch, and never reaches claude", () => {
+    signIn();
+    const r = sb.ccc(["2", "--gpt", "-c"]);
+    assert.equal(r.status, 0, r.stderr);
+    const call = lastCall(sb);
+    assert.equal(call.configDir, join(sb.profilesDir, "account2"));
+    assert.match(plain(call.args), /^--settings \S+\.json -c$/);
+
+    sb.ccc(["2", "-c"]);
+    assert.equal(lastCall(sb).args, "-c", "without it, the account starts as always");
+  });
+
+  test("an account whose saved default model is a GPT model starts through the router by itself", () => {
+    signIn();
+    const settings = join(sb.profilesDir, "account2", "settings.json");
+    const saved = sb.readJson(settings);
+    sb.writeJson(settings, { ...saved, model: "gpt-6.1-sol" });
+    try {
+      sb.ccc(["2"]);
+      assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+    } finally {
+      sb.writeJson(settings, saved);
+    }
+  });
+
+  test("picking the ChatGPT account in the picker starts it the same way", () => {
+    signIn();
+    const r = sb.ccc([], { input: "6\n", env: { ...sb.env, CCC_NO_USAGE: "1" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account6"));
+    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+  });
+
+  test("picking a Claude account with --gpt on the command line works too", () => {
+    signIn();
+    const r = sb.ccc(["--gpt"], { input: "2\n", env: { ...sb.env, CCC_NO_USAGE: "1" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account2"));
+    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+  });
+});

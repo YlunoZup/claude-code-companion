@@ -1,6 +1,6 @@
 # claude-multi-account
 
-Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, see which Claude account each one is signed into, and how much of its 5-hour and weekly limits is left — live.
+Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, see which Claude account each one is signed into, and how much of its 5-hour and weekly limits is left — live. With a ChatGPT plan, the GPT models run in Claude Code too, picked in `/model` like any other.
 
 ## Statusline
 
@@ -17,7 +17,7 @@ The statusline appears at the bottom of every Claude Code session and shows whic
 | **Git** | The current branch; hidden outside a repository and on a detached HEAD |
 | **Directory** | The working directory: `~` for home, and only the last two components of anything deeper |
 | **Context** | Context window usage: green below 50%, amber below 80%, red from there |
-| **Limits** | How much of the account's 5-hour and weekly limits is left — the figures the picker shows, which Claude Code passes in. Under a fifth left, it also says when that window resets. Absent for an API key, and until the session's first response |
+| **Limits** | How much of the account's 5-hour and weekly limits is left — the figures the picker shows, which Claude Code passes in. Under a fifth left, it also says when that window resets. Absent for an API key, and until the session's first response. On a [GPT model](#gpt-models) it says `Using ChatGPT plan` instead |
 
 Each segment is white text on its own colour block, so the account is readable at a glance — no need to check config or environment variables. The statusline is a single Node script with no dependencies, so there is nothing else to install.
 
@@ -52,14 +52,56 @@ Run `ccc` to get the interactive picker. Every account shows who it is signed in
   ┃   [4]  ○  Spare                                          ┃
   ┃         not logged in  ·  ccc login 4                    ┃
   ┃                                                          ┃
+  ┃   [5]  ●  ChatGPT                                        ┃
+  ┃         me@example.com  ·  ChatGPT                       ┃
+  ┃         GPT models in Claude Code, on your ChatGPT plan  ┃
+  ┃         usage: chatgpt.com/settings/usage                ┃
+  ┃                                                          ┃
   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-  Select account [1/2/3/4, r to refresh, q to quit]:
+  Select account [1/2/3/4/5, r to refresh, q to quit]:
 ```
 
 - **Usage** is the share of each limit still *left*: green at half or more, amber under half, red under a fifth. The 5-hour window has no reset time until something starts it.
 - **same login as [n]** means two slots are signed into one Claude account, so they share its limits. `ccc login <slot>` puts a different Claude account in the slot.
+- **ChatGPT** is the account `ccc gpt login` adds: Claude Code on the [GPT models](#gpt-models). A Claude account set to always offer them as well is marked **+ GPT models**.
 - Press a number to launch that account, **r** to fetch the usage again, **q** to quit. `ccc list` prints the same overview without the prompt.
+
+## GPT Models
+
+With a ChatGPT plan, Claude Code can run on the GPT models too. It is still all Claude Code — its screen, tools, slash commands, `CLAUDE.md`, MCP servers and hooks — with a GPT model answering instead of Claude, on your ChatGPT plan's usage. The Codex app and CLI are not involved.
+
+```bash
+ccc gpt login     # sign in with ChatGPT, once; adds an account for the GPT models
+ccc 6             # that account: Claude Code on GPT only (its number is printed at sign-in)
+ccc 2 --gpt       # any Claude account, with the GPT models added to /model
+ccc gpt on 2      # ...on every launch of account 2 (ccc gpt off 2 stops)
+ccc gpt status    # who is signed in, and which models the plan gives
+ccc gpt models    # the models, refreshed from OpenAI
+ccc gpt logout    # sign ChatGPT out and revoke ccc's access
+```
+
+In `/model` the GPT models appear as rows marked **ChatGPT plan**. On a Claude account they come after the Claude models, and switching back and forth works within one conversation — switch between turns, not while a tool call is running. The effort control works on them too: Claude Code's effort becomes the GPT model's reasoning effort. Claude Code's default is High, while OpenAI's own defaults for these models are lower, so Medium or Low saves plan usage.
+
+On the ChatGPT account, Claude Code's own background requests (session titles and the like) go to the plan's smallest model, and the header reads `API Usage Billing` — Claude Code's name for any login that is not a Claude one; nothing is billed to an API.
+
+### How it works
+
+`ccc gpt login` is OpenAI's [Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source), which OpenAI opened to open-source tools and personal projects that run locally. You approve `claude-multi-account` once in the browser; its requests then count against your ChatGPT plan, and you can cap or cut off its share at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). The sign-in is ccc's own, kept in `~/.claude-profiles/chatgpt/auth.json` (readable by you alone). It never touches the Codex app's `~/.codex/auth.json`: OpenAI replaces the refresh token on every use, so two programs sharing one login would sign each other out.
+
+A launch with the GPT models starts `router.cjs`, which listens on `127.0.0.1` for as long as that Claude Code runs and is the address Claude Code sends its requests to (`ANTHROPIC_BASE_URL`). By the model each request names:
+
+- **a Claude model** goes on to `api.anthropic.com` byte for byte, with the account's own login — Claude Code's header, which the router passes on and never stores. The rate-limit headers come back the same way, so the picker's and the statusline's figures still work.
+- **a GPT model** is translated to OpenAI's Responses API and back. A GPT model's reasoning rides along in the conversation, so it keeps its train of thought from one turn to the next.
+
+The GPT rows reach `/model` through a `modelPicker` setting passed with `--settings`. Each "behaves as" `claude-sonnet-4-6`, a model Claude Code knows: that gives it a 200K context window, inside every GPT model's, so Claude Code compacts the conversation before a GPT model would run out of room. A per-session key keeps any other program on the machine from spending your plan through the router. `~/.claude-profiles/chatgpt/router.log` records each GPT request's model, status and token counts, and never a prompt or a token.
+
+### Limits
+
+- **Usage figures.** OpenAI does not report how much of the plan is left on this route, so the picker and statusline cannot show it; [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage) does. When the plan or ccc's share runs out, Claude Code says so with that link.
+- **Claude-only tools.** Anthropic's server-side tools, web search among them, run on Anthropic's servers, so a GPT model goes without them.
+- **A GPT model saved as the default.** `/model` can save a GPT model as an account's default. `ccc` then adds the GPT models whenever it starts that account, but a plain `claude` cannot run it — which matters only for the default profile, the one `claude` itself opens. `ccc repair` points it out.
+- **Not an Anthropic feature.** Claude Code supports other endpoints through `ANTHROPIC_BASE_URL`, but Anthropic does not support running it on non-Claude models. The GPT models were trained on Codex's tools rather than Claude Code's, so expect the odd rough edge.
 
 ## How It Works
 
@@ -155,6 +197,10 @@ ccc 3 -r "fix the bug in auth.ts"
 
 # Every account, who it is signed in as, and its live usage
 ccc list
+
+# GPT models on your ChatGPT plan (see "GPT Models" above)
+ccc gpt login              # sign in with ChatGPT; adds an account for them
+ccc 2 --gpt                # account 2 with the GPT models added to /model
 
 # Manage accounts
 ccc add My Work            # add an account (prompts for a name if you leave it out)
@@ -268,6 +314,9 @@ claude-multi-account/
 │   ├── profiles.cjs            # Shared profile/config logic (also a small CLI)
 │   ├── picker.mjs              # Interactive account picker UI
 │   ├── usage.cjs               # Live usage, asked of Claude Code
+│   ├── chatgpt.cjs             # Sign in with ChatGPT, and the GPT model list
+│   ├── router.cjs              # Local router: Claude requests to Anthropic, GPT ones to OpenAI
+│   ├── translate.cjs           # Anthropic Messages API <-> OpenAI Responses API
 │   └── statusline.js           # Statusline (account, model, branch, directory, context)
 ├── test/                       # Test suite (node --test, no dependencies)
 ├── .github/workflows/ci.yml    # Cross-platform CI
@@ -277,6 +326,7 @@ claude-multi-account/
 ## Uninstall
 
 ```bash
+ccc gpt logout               # if you signed in with ChatGPT: revokes ccc's access
 rm ~/.local/bin/ccc          # or wherever you installed it
 rm ~/.local/bin/ccc.bat      # Windows only
 rm -rf ~/.claude-profiles    # Removes all profiles and config
@@ -302,7 +352,7 @@ It runs the real `install.sh`, `bin/ccc`, `install.bat` and `bin/ccc.bat` agains
 throwaway `HOME` with a stub `claude` on `PATH` that records `CLAUDE_CONFIG_DIR` and
 its arguments instead of launching anything. **No test touches the macOS Keychain, a
 real Claude account, or your actual `~/.claude`** — a profile with no credentials is
-exactly the state every test starts from. The stub `claude` answers usage requests with canned figures too, so no test ever starts the real Claude Code.
+exactly the state every test starts from. The stub `claude` answers usage requests with canned figures too, so no test ever starts the real Claude Code. The GPT tests play OpenAI with stand-ins on `127.0.0.1` — the sign-in, signed ID tokens, rotating refresh tokens, the Responses stream — so none of them reaches OpenAI either.
 
 The Windows CMD suite (`test/windows.test.mjs`) skips on other platforms.
 

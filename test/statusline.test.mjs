@@ -397,3 +397,41 @@ describe("limitsLabel", () => {
     }
   });
 });
+
+describe("GPT models", () => {
+  test("a GPT model is known by its name, or by the list the ChatGPT sign-in last gave", () => {
+    const sb = makeSandbox();
+    try {
+      assert.equal(statusline.isGptModel("gpt-6.1-sol", { home: sb.home }), true);
+      assert.equal(statusline.isGptModel("claude-opus-5-5", { home: sb.home }), false);
+      assert.equal(statusline.isGptModel("", { home: sb.home }), false);
+      assert.equal(statusline.isGptModel("sol-next", { home: sb.home }), false);
+      sb.writeJson(join(sb.profilesDir, "chatgpt", "models.json"), { fetchedAt: Date.now(), models: [{ id: "sol-next" }] });
+      assert.equal(statusline.isGptModel("sol-next", { home: sb.home }), true);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  // The rate limits Claude Code passes in are the Claude account's, left over
+  // from its last Claude reply; on a GPT model they would mislead.
+  test("on a GPT model the line says the ChatGPT plan is paying, in place of the Claude limits", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+      const now = Date.now();
+      const r = runStatusline(
+        sb,
+        session(sb.home, {
+          model: { id: "gpt-6.1-sol", display_name: "GPT-6.1-Sol" },
+          rate_limits: { five_hour: { used_percentage: 23, resets_at: Math.floor(now / 1000) + 3600 } },
+        }),
+        join(sb.profilesDir, "account6")
+      );
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(stripAnsi(r.stdout), " ChatGPT  GPT-6.1-Sol  ~   ctx 74k/200k (37%)  Using ChatGPT plan\n");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});

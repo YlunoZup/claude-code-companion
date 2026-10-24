@@ -50,7 +50,7 @@ jobs:
       - name: Line endings
         run: |
           fail=0
-          for f in install.sh bin/ccc src/profiles.cjs src/picker.mjs src/usage.cjs src/statusline.js; do
+          for f in install.sh bin/ccc src/profiles.cjs src/picker.mjs src/usage.cjs src/statusline.js src/chatgpt.cjs src/translate.cjs src/router.cjs; do
             if grep -qU $'\r' "$f"; then echo "::error file=$f::contains CR"; fail=1; fi
           done
           for f in install.bat bin/ccc.bat; do
@@ -113,6 +113,9 @@ jobs:
           test -f "$HOME/.claude-profiles/picker.mjs"
           test -f "$HOME/.claude-profiles/usage.cjs"
           test -f "$HOME/.claude-profiles/statusline.js"
+          test -f "$HOME/.claude-profiles/chatgpt.cjs"
+          test -f "$HOME/.claude-profiles/translate.cjs"
+          test -f "$HOME/.claude-profiles/router.cjs"
           test -f "$HOME/bin/ccc"
           echo "installed OK"
 

@@ -87,6 +87,17 @@ if errorlevel 1 (
 )
 echo   [ OK] Installed picker.mjs
 
+:: ── The GPT models: the ChatGPT sign-in, and the router that serves them ──
+echo   [INFO] Installing GPT support...
+for %%f in (chatgpt.cjs translate.cjs router.cjs) do (
+    copy /Y "%SCRIPT_DIR%src\%%f" "%PROFILES_DIR%\%%f" >nul
+    if errorlevel 1 (
+        echo   [ERR] Could not install %%f
+        exit /b 1
+    )
+)
+echo   [ OK] Installed chatgpt.cjs, translate.cjs and router.cjs
+
 :: ── Copy config (if not exists) ─────────────────────────────
 if not exist "%PROFILES_DIR%\config.json" (
     copy /Y "%SCRIPT_DIR%config.example.json" "%PROFILES_DIR%\config.json" >nul

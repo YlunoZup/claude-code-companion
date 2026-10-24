@@ -1,9 +1,11 @@
 @echo off
 :: Claude Code Account Switcher (Windows CMD)
-:: Usage: ccc [args...]    - pick an account (who it is signed in as, live usage)
-::        ccc N [args...]  - launches directly with Account N
-::        ccc help         - every command: list, add, login, logout, rename,
-::                           remove, repair
+:: Usage: ccc [args...]        - pick an account (who it is signed in as, live usage)
+::        ccc N [args...]      - launches directly with Account N
+::        ccc N --gpt [args]   - the same, with the GPT models added to /model
+::        ccc gpt login        - sign in with ChatGPT, for the GPT models
+::        ccc help             - every command: list, add, login, logout, rename,
+::                               remove, repair, gpt
 ::
 :: Everything that touches config.json or settings.json goes through
 :: profiles.cjs. Nothing on this page embeds JavaScript source, which is what
@@ -14,6 +16,8 @@ setlocal enabledelayedexpansion
 set "PROFILES_DIR=%USERPROFILE%\.claude-profiles"
 set "PROFILES_LIB=%PROFILES_DIR%\profiles.cjs"
 set "PICKER=%PROFILES_DIR%\picker.mjs"
+set "CHATGPT_LIB=%PROFILES_DIR%\chatgpt.cjs"
+set "ROUTER=%PROFILES_DIR%\router.cjs"
 
 where node >nul 2>nul
 if errorlevel 1 (
@@ -46,6 +50,7 @@ if /i "%ARG1%"=="repair" goto :repair
 if /i "%ARG1%"=="login" goto :login
 if /i "%ARG1%"=="relogin" goto :login
 if /i "%ARG1%"=="logout" goto :logout
+if /i "%ARG1%"=="gpt" goto :gpt
 
 echo %ARG1%| findstr /r "^-*[0-9][0-9]*$" >nul 2>nul
 if errorlevel 1 goto :picker
@@ -133,7 +138,8 @@ if errorlevel 1 (
 node "%PROFILES_LIB%" repair !SLOT!
 exit /b !ERRORLEVEL!
 
-:: ── ccc login^|logout ^<n^> — Claude Code's own sign-in, for that slot
+:: ── ccc login^|logout ^<n^> — that slot's own sign-in ───────
+:: Claude Code's for a Claude account; ChatGPT's for the ChatGPT account.
 :login
 set "AUTH_ACTION=login"
 goto :auth
@@ -145,27 +151,53 @@ if errorlevel 1 (
     echo   Usage: ccc !AUTH_ACTION! ^<number^>   ^(ccc list shows the numbers^)
     exit /b 1
 )
+set "MODE="
+for /f "delims=" %%m in ('node "%PROFILES_LIB%" launch-mode !SLOT!') do set "MODE=%%m"
+if /i "!MODE!"=="gpt" goto :auth_gpt
 for /f "delims=" %%d in ('node "%PROFILES_LIB%" resolve-account !SLOT!') do set "TARGET=%%d"
 if not defined TARGET (
     echo   Error: could not resolve account !SLOT!.
     exit /b 1
 )
+set "MODE=claude"
 call :launch "!TARGET!" "auth !AUTH_ACTION! !MORE!"
 exit /b !ERRORLEVEL!
+:auth_gpt
+if not exist "%CHATGPT_LIB%" goto :gpt_missing
+node "%CHATGPT_LIB%" !AUTH_ACTION! !MORE!
+exit /b !ERRORLEVEL!
+
+:: ── ccc gpt … — the GPT models, on your ChatGPT plan ────────
+:gpt
+if not exist "%CHATGPT_LIB%" goto :gpt_missing
+if not exist "%ROUTER%" goto :gpt_missing
+set "GPT_SUB="
+set "GPT_MORE="
+for /f "tokens=1,*" %%a in ("!REST!") do (
+    set "GPT_SUB=%%a"
+    set "GPT_MORE=%%b"
+)
+if /i "!GPT_SUB!"=="on" goto :gpt_toggle
+if /i "!GPT_SUB!"=="off" goto :gpt_toggle
+node "%CHATGPT_LIB%" !REST!
+exit /b !ERRORLEVEL!
+:gpt_toggle
+set "REST=!GPT_MORE!"
+call :take_slot
+if errorlevel 1 (
+    echo   Usage: ccc gpt !GPT_SUB! ^<number^>
+    exit /b 1
+)
+node "%PROFILES_LIB%" set-gpt !SLOT! !GPT_SUB!
+exit /b !ERRORLEVEL!
+:gpt_missing
+echo   The GPT support files are missing from %PROFILES_DIR%. Re-run the installer:  install.bat
+exit /b 1
 
 :: ── ccc ^<number^> — quick-switch ────────────────────────────
 :quickswitch
 set "ACCT=%ARG1:-=%"
-
-:: config.json decides which slot is the default profile — the same rule the
-:: bash launcher follows. Slot 1 is not hardcoded here any more.
-for /f "delims=" %%d in ('node "%PROFILES_LIB%" resolve-account !ACCT!') do set "TARGET=%%d"
-if not defined TARGET (
-    echo   Error: could not resolve account !ACCT!.
-    exit /b 1
-)
-
-call :launch "!TARGET!" "!REST!"
+call :launch_slot "!ACCT!" "!REST!"
 exit /b !ERRORLEVEL!
 
 :: ── ccc — interactive picker ────────────────────────────────
@@ -175,10 +207,33 @@ if not exist "%PICKER%" (
     exit /b 1
 )
 
-for /f "delims=" %%i in ('node "%PICKER%"') do set "PROFILE_PATH=%%i"
-if not defined PROFILE_PATH exit /b 0
+for /f "delims=" %%i in ('node "%PICKER%"') do set "PICKED=%%i"
+if not defined PICKED exit /b 0
 
-call :launch "!PROFILE_PATH!" "%*"
+call :launch_slot "!PICKED!" "%*"
+exit /b !ERRORLEVEL!
+
+:: ── Start an account ────────────────────────────────────────
+:: config.json decides which profile a slot is — the same rule the bash
+:: launcher follows — and whether it runs plain Claude Code or goes through
+:: router.cjs for the GPT models: the ChatGPT account always, any other
+:: account when --gpt is among the arguments or `ccc gpt on` set it.
+:launch_slot
+set "LAUNCH_SLOT=%~1"
+set "SLOT_ARGS=%~2"
+set "WANT_GPT="
+if defined SLOT_ARGS echo " !SLOT_ARGS! " | findstr /i /c:" --gpt " >nul 2>nul && set "WANT_GPT=--gpt"
+if defined WANT_GPT set "SLOT_ARGS=!SLOT_ARGS:--gpt=!"
+set "TARGET="
+for /f "delims=" %%d in ('node "%PROFILES_LIB%" resolve-account !LAUNCH_SLOT!') do set "TARGET=%%d"
+if not defined TARGET (
+    echo   Error: could not resolve account !LAUNCH_SLOT!.
+    exit /b 1
+)
+set "MODE="
+for /f "delims=" %%m in ('node "%PROFILES_LIB%" launch-mode !LAUNCH_SLOT! !WANT_GPT!') do set "MODE=%%m"
+if not defined MODE set "MODE=claude"
+call :launch "!TARGET!" "!SLOT_ARGS!"
 exit /b !ERRORLEVEL!
 
 :: ── Launch claude with the right profile ────────────────────
@@ -203,7 +258,12 @@ if "%TARGET_DIR%"=="__DEFAULT__" (
     set "CLAUDE_CONFIG_DIR=%TARGET_DIR%"
 )
 
+if /i not "!MODE!"=="claude" goto :launch_router
 call claude %LAUNCH_ARGS%
+exit /b %ERRORLEVEL%
+:launch_router
+if not exist "%ROUTER%" goto :gpt_missing
+node "%ROUTER%" launch --mode !MODE! -- %LAUNCH_ARGS%
 exit /b %ERRORLEVEL%
 
 :: ── The account number a command acts on ───────────────────

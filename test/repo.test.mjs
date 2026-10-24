@@ -18,6 +18,9 @@ const SOURCE_FILES = [
   join("src", "picker.mjs"),
   join("src", "usage.cjs"),
   join("src", "statusline.js"),
+  join("src", "chatgpt.cjs"),
+  join("src", "translate.cjs"),
+  join("src", "router.cjs"),
 ];
 
 const read = (f) => readFileSync(join(REPO_ROOT, f), "utf8");

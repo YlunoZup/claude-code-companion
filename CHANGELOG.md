@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **GPT models in Claude Code, on a ChatGPT plan.** `ccc gpt login` signs in
+  with OpenAI's Sign in with ChatGPT plan usage — the route OpenAI opened to
+  open-source tools and personal projects that run locally — and adds an account
+  that runs Claude Code on the GPT models. `ccc <n> --gpt` adds them to any
+  Claude account's `/model` for one launch, `ccc gpt on|off <n>` for every
+  launch. `ccc gpt status`, `models` and `logout` round it off, and
+  `ccc login|logout <n>` on the ChatGPT account go to ChatGPT.
+  - A launch with the GPT models runs a router on `127.0.0.1` for as long as
+    Claude Code runs. A Claude request goes on to Anthropic byte for byte with
+    the account's own login; a GPT request is translated to OpenAI's Responses
+    API and back, streaming, with tool calls, images, structured output and the
+    model's reasoning carried from turn to turn. A per-session key keeps other
+    programs on the machine from spending the plan through it.
+  - The sign-in is ccc's own, in `~/.claude-profiles/chatgpt/auth.json`, never
+    the Codex app's: OpenAI rotates refresh tokens, so sharing one would sign
+    the app out. Refreshes are serialised across sessions; tokens are never
+    printed or logged.
+  - The GPT models reach `/model` as rows that behave as `claude-sonnet-4-6`,
+    which gives them a 200K context window and the effort control.
+  - The picker shows the ChatGPT account, and the statusline says
+    `Using ChatGPT plan` on a GPT model instead of the Claude account's limits.
+    OpenAI reports no usage figures on this route; the picker points at
+    chatgpt.com/settings/usage.
+  - An account whose saved default model is a GPT model starts with the GPT
+    models by itself, and `ccc repair` flags one on the default profile, which
+    plain `claude` cannot run.
 - **Live usage in the picker.** Every signed-in account shows how much of its
   5-hour and weekly limits is left, and when each resets. The figures come from
   Claude Code itself: `ccc` starts `claude -p` in each profile with a single
@@ -98,6 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The picker prints the chosen account's number, not its profile path, and the
+  launchers resolve it themselves, so the ChatGPT account and a Claude account
+  start the same way.
 - `ccc add` now ends by pointing at `ccc login <n>` to sign the account in.
 - Sign-in detection moved from `picker.mjs` into `profiles.cjs`, which the picker
   and `ccc repair` share. `CCC_NO_KEYCHAIN=1` skips the Keychain lookup; the test

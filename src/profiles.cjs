@@ -453,6 +453,86 @@ function addAccount({ home, key, name, platform }) {
   return { status: "ok", key: String(key), name, dirName, dir, settings, shared };
 }
 
+// ── The ChatGPT account ──────────────────────────────────────
+//
+// An entry with "provider": "chatgpt" runs Claude Code on the GPT models, signed
+// in with ChatGPT rather than a Claude login. Any other account can have the GPT
+// models added to its /model picker — for one launch with --gpt, or for every
+// launch with "gpt": true — while its own Claude login carries on as usual.
+
+function isGptAccount(entry) {
+  return Boolean(entry && typeof entry === "object" && entry.provider === "chatgpt");
+}
+
+// The slot of the ChatGPT account, adding one when there is none. Called after a
+// ChatGPT sign-in, so that signing in is all it takes to get the entry.
+function ensureGptAccount({ home, name = "ChatGPT", platform } = {}) {
+  const p = paths(home);
+  const read = readConfig(p.config);
+  if (read.status === "unreadable" || read.status === "invalid") return { status: read.status, error: read.error };
+  const config = read.status === "missing" ? defaultConfig() : read.config;
+
+  const existing = Object.entries(config.accounts).find(([, entry]) => isGptAccount(entry));
+  if (existing) return { status: "ok", key: existing[0], name: existing[1].name || name, created: false };
+
+  const key = String(nextAccountNumber(config));
+  const dirName = `account${key}`;
+  const dir = path.join(p.profiles, dirName);
+  config.accounts[key] = { name, configDir: dirName, provider: "chatgpt" };
+  writeJsonAtomic(p.config, config);
+  fs.mkdirSync(dir, { recursive: true });
+  applyStatusLine(path.join(dir, "settings.json"), p.profiles, platform);
+  ensureSharedProjects(dir, p.claude, platform);
+  return { status: "ok", key, name, created: true, dir };
+}
+
+// The model a profile starts on when nothing else says, as /model saved it.
+function savedModel(settingsPath) {
+  const settings = readJsonFile(settingsPath);
+  return settings.status === "ok" && typeof settings.value.model === "string" ? settings.value.model : null;
+}
+
+// How to start a slot:
+//   "gpt"     the ChatGPT account: GPT models only
+//   "mixed"   a Claude account with the GPT models added — asked for with
+//             --gpt, set with `ccc gpt on`, or because /model saved a GPT model
+//             as the account's default, which plain Claude Code cannot run
+//   "claude"  as always
+function launchMode(config, key, { home, wantGpt = false } = {}) {
+  const entry = ((config && config.accounts) || {})[String(key)];
+  if (isGptAccount(entry)) return { mode: "gpt" };
+  if (wantGpt) return { mode: "mixed", reason: "asked" };
+  if (entry && entry.gpt === true) return { mode: "mixed", reason: "always" };
+
+  const p = paths(home);
+  const resolved = resolveAccount(config, key, p.profiles);
+  const dir = resolved.kind === "default" ? p.claude : resolved.dir;
+  const model = savedModel(path.join(dir, "settings.json"));
+  if (model && require("./chatgpt.cjs").isGptModelId(model, gptModels(home))) return { mode: "mixed", reason: "saved-model", model };
+  return { mode: "claude" };
+}
+
+// The GPT models last listed for the ChatGPT sign-in, without asking OpenAI.
+function gptModels(home) {
+  const cached = readJsonFile(path.join(paths(home).profiles, "chatgpt", "models.json"));
+  return cached.status === "ok" && Array.isArray(cached.value.models) ? cached.value.models : [];
+}
+
+// `ccc gpt on|off <n>`: offer the GPT models in a Claude account on every
+// launch, or stop.
+function setGpt({ home, key, on }) {
+  const p = paths(home);
+  const read = readConfig(p.config);
+  if (read.status !== "ok") return { status: read.status === "missing" ? "no-account" : read.status, error: read.error };
+  const entry = read.config.accounts[String(key)];
+  if (!entry || typeof entry !== "object") return { status: "no-account" };
+  if (isGptAccount(entry)) return { status: "is-gpt" };
+  if (on) entry.gpt = true;
+  else delete entry.gpt;
+  writeJsonAtomic(p.config, read.config);
+  return { status: "ok", name: entry.name || `Account ${key}` };
+}
+
 // ── Renaming and removing ────────────────────────────────────
 
 function renameAccount({ home, key, name }) {
@@ -523,6 +603,23 @@ function repairAccount(key, entry, { home, platform, earlier = [] } = {}) {
   else if (statusLine.status === "created" || statusLine.status === "added") note("fixed", "added the statusline");
   else note("todo", "settings.json does not parse, so it was left alone — fix it by hand");
 
+  if (isGptAccount(entry)) {
+    const chatgpt = require("./chatgpt.cjs").status({ home });
+    if (!chatgpt.signedIn) note("todo", "ChatGPT is not signed in — run: ccc gpt login");
+    else if (!chatgpt.planUsage) note("todo", "ccc may not use the ChatGPT plan — run ccc gpt login and allow it");
+    else note("ok", `signed in with ChatGPT${chatgpt.email ? ` as ${chatgpt.email}` : ""} · ${chatgpt.planLabel}`);
+    return { findings, state: { key: String(key), provider: "chatgpt", signedIn: chatgpt.signedIn, accountUuid: null } };
+  }
+
+  // /model can save a GPT model as the account's default. ccc then adds the GPT
+  // models whenever it starts the account, but plain `claude` cannot run it —
+  // which matters for the default profile, the one `claude` itself opens.
+  const model = savedModel(path.join(dir, "settings.json"));
+  if (model && require("./chatgpt.cjs").isGptModelId(model, gptModels(home))) {
+    if (configDir) note("ok", `starts on ${model}, so ccc adds the GPT models when it starts it`);
+    else note("todo", `starts on ${model}, which plain \`claude\` cannot run — start it with ccc ${key}, or pick a Claude model in /model`);
+  }
+
   const state = accountState(configDir, { home, platform });
   if (!state.signedIn) {
     note("todo", `not signed in — run: ccc login ${key}`);
@@ -552,8 +649,19 @@ const HELP = `ccc — Claude Code with any of your accounts
 
   Also: relogin = login, ls = list, rm = remove.
 
+GPT models, on your ChatGPT plan:
+
+  ccc gpt login            sign in with ChatGPT; adds an account that runs
+                           Claude Code on the GPT models
+  ccc <n> --gpt            start account n with the GPT models added to /model
+  ccc gpt on <n>           always add them to account n (ccc gpt off <n> stops)
+  ccc gpt status           show the ChatGPT sign-in and its models
+  ccc gpt logout           sign ChatGPT out
+
 Usage is the share of each account's 5-hour and weekly limits still left, live
 from Claude Code. Set CCC_NO_USAGE=1 to skip it and open the picker instantly.
+GPT requests count against your ChatGPT plan instead; manage how much ccc may
+use at https://chatgpt.com/settings/usage
 
 Accounts are listed in ~/.claude-profiles/config.json.`;
 
@@ -575,6 +683,9 @@ const USAGE = `usage: profiles.cjs <command> [args]
   rename-account <slot>            rename a slot (name from CC_ACCOUNT_NAME)
   remove-account <slot>            take a slot off the list, keeping its files
   repair [slot]                    check one slot or all of them, fixing what it can
+  launch-mode <slot> [--gpt]       print how to start a slot: claude, mixed or gpt
+  set-gpt <slot> on|off            always add the GPT models to a slot, or stop
+  ensure-gpt-account               print the ChatGPT account's slot, adding one
   help                             print the help ccc shows for \`ccc help\``;
 
 function fail(message) {
@@ -697,6 +808,42 @@ function main(argv) {
     case "repair":
       return repairCommand(p, rest[0]);
 
+    case "launch-mode": {
+      if (!rest[0]) return usage();
+      const read = readConfig(p.config);
+      if (read.status !== "ok" && read.status !== "missing") {
+        return fail(`Cannot read ${p.config}: ${read.error.message}`);
+      }
+      const config = read.status === "missing" ? defaultConfig() : read.config;
+      process.stdout.write(launchMode(config, rest[0], { home: p.home, wantGpt: rest.includes("--gpt") }).mode);
+      return 0;
+    }
+
+    case "set-gpt": {
+      const [key, onOff] = rest;
+      if (!key || (onOff !== "on" && onOff !== "off")) return usage();
+      const result = setGpt({ home: p.home, key, on: onOff === "on" });
+      if (result.status === "no-account") return noAccount(key);
+      if (result.status === "is-gpt") {
+        process.stderr.write(`  Account ${key} is the ChatGPT account; it always runs on the GPT models.\n`);
+        return 1;
+      }
+      if (result.status !== "ok") return fail(`Refusing to rewrite ${p.config}: ${result.error.message}`);
+      process.stdout.write(
+        onOff === "on"
+          ? `  Account ${key} (${result.name}) now starts with the GPT models in /model.\n`
+          : `  Account ${key} (${result.name}) no longer adds the GPT models; ccc ${key} --gpt still does for one launch.\n`
+      );
+      return 0;
+    }
+
+    case "ensure-gpt-account": {
+      const result = ensureGptAccount({ home: p.home, name: process.env.CC_ACCOUNT_NAME || "ChatGPT" });
+      if (result.status !== "ok") return fail(`Refusing to rewrite ${p.config}: ${result.error.message}`);
+      process.stdout.write(result.key);
+      return 0;
+    }
+
     case "help":
       process.stdout.write(HELP + "\n");
       return 0;
@@ -785,6 +932,12 @@ module.exports = {
   inKeychain,
   accountState,
   addAccount,
+  isGptAccount,
+  ensureGptAccount,
+  savedModel,
+  launchMode,
+  gptModels,
+  setGpt,
   renameAccount,
   removeAccount,
   repairAccount,

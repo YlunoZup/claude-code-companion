@@ -96,6 +96,13 @@ cp "$SCRIPT_DIR/src/usage.cjs" "$PROFILES_DIR/usage.cjs"
 cp "$SCRIPT_DIR/src/picker.mjs" "$PROFILES_DIR/picker.mjs"
 ok "Installed picker.mjs -> $PROFILES_DIR/picker.mjs"
 
+# ── The GPT models: the ChatGPT sign-in, and the router that serves them ──
+info "Installing GPT support..."
+for f in chatgpt.cjs translate.cjs router.cjs; do
+    cp "$SCRIPT_DIR/src/$f" "$PROFILES_DIR/$f"
+done
+ok "Installed chatgpt.cjs, translate.cjs and router.cjs"
+
 # ── Copy config (if not exists) ──────────────────────────────
 if [[ ! -f "$PROFILES_DIR/config.json" ]]; then
     cp "$SCRIPT_DIR/config.example.json" "$PROFILES_DIR/config.json"

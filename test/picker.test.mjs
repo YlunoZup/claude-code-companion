@@ -1,8 +1,9 @@
 // Tests for the account picker.
 //
 // The picker's contract with the shell launchers is narrow and worth pinning:
-// the chosen profile path goes to stdout and nothing else does, the UI goes to
-// stderr, and "__DEFAULT__" means the default ~/.claude profile.
+// the chosen account's number goes to stdout and nothing else does, and the UI
+// goes to stderr. The launchers resolve the number to a profile themselves, so
+// the ChatGPT account and a Claude account start the same way.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -11,7 +12,7 @@ import { join } from "node:path";
 import { makeSandbox, stripAnsi, usageAnswer } from "./helpers.test.mjs";
 
 describe("stdout contract", () => {
-  test("choosing a profile writes only its path to stdout", () => {
+  test("choosing an account writes only its number to stdout", () => {
     const sb = makeSandbox();
     try {
       sb.writeJson(sb.configPath, {
@@ -20,18 +21,18 @@ describe("stdout contract", () => {
 
       const r = sb.node("src/picker.mjs", [], {}, "2\n");
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(r.stdout, join(sb.profilesDir, "account2"));
+      assert.equal(r.stdout, "2");
     } finally {
       sb.cleanup();
     }
   });
 
-  test("choosing the default profile writes the __DEFAULT__ sentinel", () => {
+  test("choosing the default profile writes its number too", () => {
     const sb = makeSandbox();
     try {
       sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null } } });
       const r = sb.node("src/picker.mjs", [], {}, "1\n");
-      assert.equal(r.stdout, "__DEFAULT__");
+      assert.equal(r.stdout, "1");
     } finally {
       sb.cleanup();
     }
@@ -45,7 +46,7 @@ describe("stdout contract", () => {
 
       assert.match(r.stderr, /Account Switcher/);
       assert.doesNotMatch(r.stdout, /Account Switcher/);
-      assert.equal(r.stdout.includes("\n"), false, "stdout must be a bare path");
+      assert.equal(r.stdout.includes("\n"), false, "stdout must be a bare number");
     } finally {
       sb.cleanup();
     }
@@ -69,7 +70,7 @@ describe("stdout contract", () => {
       sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null } } });
       const r = sb.node("src/picker.mjs", [], {}, "zzz\n1\n");
       assert.match(r.stderr, /Invalid choice/);
-      assert.equal(r.stdout, "__DEFAULT__");
+      assert.equal(r.stdout, "1");
     } finally {
       sb.cleanup();
     }
@@ -82,7 +83,7 @@ describe("config handling", () => {
     try {
       const r = sb.node("src/picker.mjs", [], {}, "2\n");
       assert.equal(r.status, 0, r.stderr);
-      assert.equal(r.stdout, join(sb.profilesDir, "account2"));
+      assert.equal(r.stdout, "2");
     } finally {
       sb.cleanup();
     }
@@ -98,7 +99,7 @@ describe("config handling", () => {
 
       const r = sb.node("src/picker.mjs", [], {}, "1\n");
       assert.equal(r.status, 1);
-      assert.equal(r.stdout, "", "must not emit a profile path");
+      assert.equal(r.stdout, "", "must not emit an account");
       assert.match(r.stderr, /could not be read/);
     } finally {
       sb.cleanup();
@@ -127,7 +128,7 @@ describe("config handling", () => {
       sb.writeJson(sb.configPath, { accounts });
 
       const r = sb.node("src/picker.mjs", [], {}, "12\n");
-      assert.equal(r.stdout, join(sb.profilesDir, "account12"));
+      assert.equal(r.stdout, "12");
     } finally {
       sb.cleanup();
     }
@@ -382,6 +383,93 @@ describe("--list", () => {
       sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null } } });
       const r = sb.node("src/picker.mjs", ["--list"], {}, "");
       assert.equal(r.stdout.includes("\x1b["), false);
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("the ChatGPT account", () => {
+  const usageCalls = (sb) => sb.calls().filter((l) => l.startsWith("claude-usage "));
+
+  function setUp(sb, { signedIn = true } = {}) {
+    sb.writeJson(sb.configPath, {
+      accounts: {
+        2: { name: "Work", configDir: "account2", gpt: true },
+        6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" },
+      },
+    });
+    sb.signIn("account2", { email: "work@example.com", accountUuid: "uuid-work" });
+    sb.setUsage({ account2: usageAnswer({ fiveHour: 10, weekly: 20 }) });
+    if (signedIn) {
+      sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), {
+        client_id: "oaiapp_test",
+        account: { email: "me@example.com" },
+        access_token: "a",
+        refresh_token: "r",
+        plan_usage: true,
+        expires_at: Date.now() + 3600000,
+      });
+    }
+  }
+
+  test("shows who it is signed in as, and that it runs on the ChatGPT plan", () => {
+    const sb = makeSandbox();
+    try {
+      setUp(sb);
+      const ui = stripAnsi(sb.node("src/picker.mjs", ["--list"]).stdout);
+      assert.match(ui, /\[6\]\s+●\s+ChatGPT/);
+      assert.match(ui, /me@example\.com\s+·\s+ChatGPT/);
+      assert.match(ui, /GPT models in Claude Code, on your ChatGPT plan/);
+      assert.match(ui, /usage: chatgpt\.com\/settings\/usage/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("its usage is not asked of Claude Code, whose limits are not ChatGPT's", () => {
+    const sb = makeSandbox();
+    try {
+      setUp(sb);
+      sb.node("src/picker.mjs", ["--list"]);
+      const asked = usageCalls(sb);
+      assert.equal(asked.length, 1, asked.join("\n"));
+      assert.match(asked[0], /account2/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a Claude account that always gets the GPT models says so", () => {
+    const sb = makeSandbox();
+    try {
+      setUp(sb);
+      assert.match(stripAnsi(sb.node("src/picker.mjs", ["--list"]).stdout), /\[2\]\s+●\s+Work\s+\+ GPT models/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("signed out, it says how to sign in, and picking it starts nothing", () => {
+    const sb = makeSandbox();
+    try {
+      setUp(sb, { signedIn: false });
+      const list = stripAnsi(sb.node("src/picker.mjs", ["--list"]).stdout);
+      assert.match(list, /not logged in\s+·\s+ccc gpt login/);
+      const r = sb.node("src/picker.mjs", [], { CCC_NO_USAGE: "1" }, "6\n");
+      assert.equal(r.status, 0);
+      assert.equal(r.stdout, "");
+      assert.match(stripAnsi(r.stderr), /not signed in to ChatGPT yet\. Run: ccc gpt login/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("picking it signed in hands its number to the launcher", () => {
+    const sb = makeSandbox();
+    try {
+      setUp(sb);
+      assert.equal(sb.node("src/picker.mjs", [], { CCC_NO_USAGE: "1" }, "6\n").stdout, "6");
     } finally {
       sb.cleanup();
     }

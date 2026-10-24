@@ -6,8 +6,10 @@
 // Sign-in state and identity come from profiles.cjs, which reads neither a token
 // nor any other secret: on macOS it asks the Keychain whether a login exists,
 // attributes only, and identity is plain JSON in the profile's .claude.json.
-// Live usage comes from usage.cjs, which asks Claude Code itself.
+// Live usage comes from usage.cjs, which asks Claude Code itself. The ChatGPT
+// account's sign-in comes from chatgpt.cjs, without its tokens.
 //
+// Picking prints the account's number on stdout, for the launcher to start.
 // With --list it prints the same overview to stdout and exits, for `ccc list`.
 
 import { realpathSync } from "fs";
@@ -15,6 +17,7 @@ import { createInterface } from "readline";
 import { homedir } from "os";
 import { join } from "path";
 import { pathToFileURL } from "url";
+import chatgpt from "./chatgpt.cjs";
 import profiles from "./profiles.cjs";
 import usage from "./usage.cjs";
 
@@ -55,6 +58,7 @@ function loadConfig(configPath = CONFIG_PATH) {
 
 function formatPlan(info) {
   if (!info.ready) return `${c.yellow}${c.dim}not logged in${c.reset}`;
+  if (info.gptAccount) return `${c.green}${c.bold}${info.planLabel || "ChatGPT"}${c.reset}`;
 
   // "default_claude_max_20x" -> "Claude Max 20x"
   const m = String(info.tier || "").match(/max_(\d+)x/i);
@@ -73,12 +77,31 @@ function formatPlan(info) {
 function buildAccounts(config) {
   const accounts = Object.entries(config.accounts).map(([key, acc]) => {
     const entry = acc && typeof acc === "object" ? acc : {};
-    const state = profiles.accountState(entry.configDir || null);
-    return {
+    const base = {
       key,
       // A config entry with no name would otherwise render as "undefined".
       name: entry.name ? String(entry.name) : `Account ${key}`,
       configDir: entry.configDir || null,
+      gptAccount: profiles.isGptAccount(entry),
+      gpt: entry.gpt === true,
+      usage: null,
+      sameAs: null,
+    };
+    if (base.gptAccount) {
+      const signIn = chatgpt.status();
+      return {
+        ...base,
+        dir: entry.configDir ? join(PROFILES_DIR, entry.configDir) : null,
+        ready: signIn.signedIn && signIn.planUsage,
+        email: signIn.email,
+        display: signIn.name,
+        accountUuid: null,
+        planLabel: signIn.planLabel,
+      };
+    }
+    const state = profiles.accountState(entry.configDir || null);
+    return {
+      ...base,
       dir: state.dir,
       ready: state.signedIn,
       email: state.email,
@@ -86,8 +109,6 @@ function buildAccounts(config) {
       accountUuid: state.accountUuid,
       sub: state.subscription,
       tier: state.tier,
-      usage: null,
-      sameAs: null,
     };
   });
 
@@ -110,7 +131,8 @@ const log = (msg = "") => write(msg + "\n");
 // two to give. A slot sharing another's login reuses that answer.
 async function loadUsage(accounts) {
   if (process.env.CCC_NO_USAGE) return;
-  const asking = accounts.filter((a) => a.ready && !a.sameAs);
+  // The ChatGPT account's limits are ChatGPT's, which only ChatGPT shows.
+  const asking = accounts.filter((a) => a.ready && !a.sameAs && !a.gptAccount);
   if (asking.length === 0) return;
 
   // The progress line always goes to stderr, so `ccc list > file` stays clean.
@@ -172,23 +194,33 @@ function render(accounts, now = Date.now()) {
     const planStr = formatPlan(acc);
 
     // Row 1: slot number, status dot, configured label, and a warning when the
-    // slot shares its login with an earlier one.
+    // slot shares its login with an earlier one, or a note that /model offers
+    // the GPT models in it too.
     const twin = acc.sameAs ? `  same login as [${acc.sameAs}]` : "";
+    const gpt = acc.gpt && !twin ? "  + GPT models" : "";
     boxRow(
-      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${clip(acc.name, W - 12 - twin.length)}${c.reset}${c.yellow}${twin}${c.reset}`
+      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${clip(acc.name, W - 12 - twin.length - gpt.length)}${c.reset}${c.yellow}${twin}${c.reset}${c.green}${gpt}${c.reset}`
     );
 
     // Row 2: which account this actually is, plus the plan on it.
     const planLen = stripAnsi(planStr).length;
     const who = acc.email || acc.display;
     if (!acc.ready) {
-      boxRow(`         ${planStr}${c.dim}  ·  ccc login ${acc.key}${c.reset}`);
+      boxRow(`         ${planStr}${c.dim}  ·  ${acc.gptAccount ? "ccc gpt login" : `ccc login ${acc.key}`}${c.reset}`);
     } else if (who) {
       const budget = W - 9 - planLen - 5;
       const whoStr = clip(who, budget);
       boxRow(`         ${c.gray}${whoStr}${c.reset}  ${c.dim}·${c.reset}  ${planStr}`);
     } else {
       boxRow(`         ${planStr}`);
+    }
+
+    // The ChatGPT account: GPT models, on the ChatGPT plan's own limits.
+    if (acc.gptAccount) {
+      boxRow(`         ${c.dim}GPT models in Claude Code, on your ChatGPT plan${c.reset}`);
+      if (acc.ready) boxRow(`         ${c.dim}usage: chatgpt.com/settings/usage${c.reset}`);
+      boxRow(blank);
+      continue;
     }
 
     // Rows 3 and 4: how much of each limit is left.
@@ -256,18 +288,18 @@ function prompt(accounts) {
 
     rl.close();
 
+    if (!acc.ready && acc.gptAccount) {
+      log(`\n  ${c.yellow}${acc.name} is not signed in to ChatGPT yet. Run: ccc gpt login${c.reset}\n`);
+      process.exit(0);
+    }
     if (!acc.ready) {
       log(
         `\n  ${c.yellow}${acc.name} is not logged in yet; Claude will prompt you to sign in.${c.reset}\n`
       );
     }
 
-    // stdout: only the profile path (read by shell wrapper)
-    if (acc.configDir) {
-      process.stdout.write(join(PROFILES_DIR, acc.configDir));
-    } else {
-      process.stdout.write("__DEFAULT__");
-    }
+    // stdout: only the account number, which the launcher starts.
+    process.stdout.write(acc.key);
   };
 
   rl.on("line", (line) => {

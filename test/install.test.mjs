@@ -18,7 +18,10 @@ describe("install.sh", () => {
       const r = sb.install();
       assert.equal(r.status, 0, r.stderr);
 
-      for (const f of ["profiles.cjs", "picker.mjs", "statusline.js", "config.json", "package.json"]) {
+      const files = ["profiles.cjs", "picker.mjs", "usage.cjs", "statusline.js", "config.json", "package.json"];
+      // The GPT support: picker.mjs imports chatgpt.cjs, so it is not optional.
+      files.push("chatgpt.cjs", "translate.cjs", "router.cjs");
+      for (const f of files) {
         assert.ok(existsSync(join(sb.profilesDir, f)), `missing ${f}`);
       }
       assert.ok(existsSync(join(sb.home, ".local", "bin", "ccc")), "launcher not installed");

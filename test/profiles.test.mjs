@@ -919,3 +919,213 @@ describe("the CLI's user-facing commands", () => {
     }
   });
 });
+
+// ── The ChatGPT account ──────────────────────────────────────
+
+// A ChatGPT sign-in as chatgpt.cjs saves it, without any network.
+function chatgptSignIn(sb, { planUsage = true } = {}) {
+  sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), {
+    client_id: "oaiapp_test",
+    account: { email: "me@example.com" },
+    access_token: "a",
+    refresh_token: "r",
+    scope: "openid",
+    plan_usage: planUsage,
+    expires_at: Date.now() + 3600000,
+  });
+}
+
+describe("ensureGptAccount", () => {
+  test("adds the ChatGPT account in the next free slot, set up like any other", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null }, 2: { name: "Two", configDir: "account2" } } });
+      const r = profiles.ensureGptAccount({ home: sb.home, name: "ChatGPT" });
+      assert.deepEqual([r.status, r.key, r.created], ["ok", "3", true]);
+      assert.deepEqual(sb.readJson(sb.configPath).accounts["3"], { name: "ChatGPT", configDir: "account3", provider: "chatgpt" });
+      assert.ok(sb.readJson(join(sb.profilesDir, "account3", "settings.json")).statusLine, "it gets the statusline");
+      assert.ok(existsSync(join(sb.profilesDir, "account3", "projects")), "and the shared history");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("is found again rather than added twice", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null }, 4: { name: "Mine", configDir: "account4", provider: "chatgpt" } } });
+      const r = profiles.ensureGptAccount({ home: sb.home, name: "ChatGPT" });
+      assert.deepEqual([r.key, r.name, r.created], ["4", "Mine", false]);
+      assert.equal(Object.keys(sb.readJson(sb.configPath).accounts).length, 2);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("refuses to rewrite a config.json it could not parse", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(sb.profilesDir, { recursive: true });
+      writeFileSync(sb.configPath, "{ broken");
+      assert.equal(profiles.ensureGptAccount({ home: sb.home }).status, "invalid");
+      assert.equal(readFileSync(sb.configPath, "utf8"), "{ broken");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("launchMode", () => {
+  const config = {
+    accounts: {
+      1: { name: "One", configDir: null },
+      2: { name: "Two", configDir: "account2" },
+      3: { name: "Always", configDir: "account3", gpt: true },
+      6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" },
+    },
+  };
+
+  test("the ChatGPT account runs on GPT; the others as they are unless asked", () => {
+    const sb = makeSandbox();
+    try {
+      const mode = (key, wantGpt) => profiles.launchMode(config, key, { home: sb.home, wantGpt }).mode;
+      assert.equal(mode("6"), "gpt");
+      assert.equal(mode("6", true), "gpt");
+      assert.equal(mode("2"), "claude");
+      assert.equal(mode("2", true), "mixed");
+      assert.equal(mode("3"), "mixed", "gpt: true asks on every launch");
+      assert.equal(mode("9"), "claude", "an unconfigured slot is a Claude account");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("an account whose saved default is a GPT model gets the GPT models, since plain Claude Code cannot run it", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(join(sb.profilesDir, "account2", "settings.json"), { model: "gpt-6.1-sol" });
+      sb.writeJson(join(sb.claudeDir, "settings.json"), { model: "opus" });
+      const two = profiles.launchMode(config, "2", { home: sb.home });
+      assert.deepEqual(two, { mode: "mixed", reason: "saved-model", model: "gpt-6.1-sol" });
+      assert.equal(profiles.launchMode(config, "1", { home: sb.home }).mode, "claude");
+
+      // A model only the cached list knows is recognised too.
+      sb.writeJson(join(sb.profilesDir, "chatgpt", "models.json"), { fetchedAt: Date.now(), models: [{ id: "sol-next" }] });
+      sb.writeJson(join(sb.claudeDir, "settings.json"), { model: "sol-next" });
+      assert.equal(profiles.launchMode(config, "1", { home: sb.home }).mode, "mixed");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("setGpt", () => {
+  test("turns the GPT models on and off for a Claude account", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 2: { name: "Two", configDir: "account2" } } });
+      assert.equal(profiles.setGpt({ home: sb.home, key: "2", on: true }).status, "ok");
+      assert.equal(sb.readJson(sb.configPath).accounts["2"].gpt, true);
+      profiles.setGpt({ home: sb.home, key: "2", on: false });
+      assert.deepEqual(sb.readJson(sb.configPath).accounts["2"], { name: "Two", configDir: "account2" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("the ChatGPT account and a missing slot are refused", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+      assert.equal(profiles.setGpt({ home: sb.home, key: "6", on: true }).status, "is-gpt");
+      assert.equal(profiles.setGpt({ home: sb.home, key: "7", on: true }).status, "no-account");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("repairAccount for the GPT models", () => {
+  test("the ChatGPT account is checked for its ChatGPT sign-in, not a Claude one", () => {
+    const sb = makeSandbox();
+    try {
+      const entry = { name: "ChatGPT", configDir: "account6", provider: "chatgpt" };
+      const out = profiles.repairAccount("6", entry, { home: sb.home });
+      assert.ok(out.findings.some((f) => f.level === "todo" && /ccc gpt login/.test(f.text)));
+      assert.ok(!out.findings.some((f) => /ccc login 6/.test(f.text)), "a Claude sign-in would not help");
+
+      chatgptSignIn(sb);
+      const again = profiles.repairAccount("6", entry, { home: sb.home });
+      assert.ok(again.findings.some((f) => f.level === "ok" && /signed in with ChatGPT as me@example\.com/.test(f.text)));
+      assert.ok(!again.findings.some((f) => f.level === "todo"));
+
+      chatgptSignIn(sb, { planUsage: false });
+      assert.ok(profiles.repairAccount("6", entry, { home: sb.home }).findings.some((f) => f.level === "todo" && /allow it/.test(f.text)));
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a GPT model saved as the default profile's model is flagged, as plain `claude` cannot run it", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(join(sb.claudeDir, "settings.json"), { model: "gpt-6.1-sol" });
+      const out = profiles.repairAccount("1", { name: "One", configDir: null }, { home: sb.home });
+      assert.ok(out.findings.some((f) => f.level === "todo" && /plain `claude` cannot run/.test(f.text)));
+
+      sb.writeJson(join(sb.profilesDir, "account2", "settings.json"), { model: "gpt-6.1-sol" });
+      const two = profiles.repairAccount("2", { name: "Two", configDir: "account2" }, { home: sb.home });
+      assert.ok(two.findings.some((f) => f.level === "ok" && /ccc adds the GPT models/.test(f.text)), "ccc starts other profiles, so that is fine");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("the CLI's GPT commands", () => {
+  test("launch-mode prints how to start a slot", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null }, 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+      assert.equal(sb.node("src/profiles.cjs", ["launch-mode", "6"]).stdout, "gpt");
+      assert.equal(sb.node("src/profiles.cjs", ["launch-mode", "1"]).stdout, "claude");
+      assert.equal(sb.node("src/profiles.cjs", ["launch-mode", "1", "--gpt"]).stdout, "mixed");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("set-gpt says what changed, and refuses the ChatGPT account", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 2: { name: "Two", configDir: "account2" }, 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+      const on = sb.node("src/profiles.cjs", ["set-gpt", "2", "on"]);
+      assert.equal(on.status, 0);
+      assert.match(on.stdout, /Account 2 \(Two\) now starts with the GPT models/);
+      const refused = sb.node("src/profiles.cjs", ["set-gpt", "6", "on"]);
+      assert.equal(refused.status, 1);
+      assert.match(refused.stderr, /always runs on the GPT models/);
+      assert.equal(sb.node("src/profiles.cjs", ["set-gpt", "2", "maybe"]).status, 1);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("ensure-gpt-account prints the slot", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null } } });
+      const r = sb.node("src/profiles.cjs", ["ensure-gpt-account"], { CC_ACCOUNT_NAME: "ChatGPT" });
+      assert.equal(r.stdout, "2");
+      assert.equal(sb.readJson(sb.configPath).accounts["2"].provider, "chatgpt");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("help covers the GPT commands", () => {
+    for (const cmd of ["ccc gpt login", "ccc <n> --gpt", "ccc gpt on <n>", "ccc gpt status", "ccc gpt logout"]) {
+      assert.ok(profiles.HELP.includes(cmd), `help is missing ${cmd}`);
+    }
+  });
+});
