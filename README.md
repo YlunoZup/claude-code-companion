@@ -92,14 +92,14 @@ On the ChatGPT account, Claude Code's own background requests (session titles an
 A launch with the GPT models starts `router.cjs`, which listens on `127.0.0.1` for as long as that Claude Code runs and is the address Claude Code sends its requests to (`ANTHROPIC_BASE_URL`). By the model each request names:
 
 - **a Claude model** goes on to `api.anthropic.com` byte for byte, with the account's own login — Claude Code's header, which the router passes on and never stores. The rate-limit headers come back the same way, so the picker's and the statusline's figures still work.
-- **a GPT model** is translated to OpenAI's Responses API and back. A GPT model's reasoning rides along in the conversation, so it keeps its train of thought from one turn to the next.
+- **a GPT model** is translated to OpenAI's Responses API and back. A GPT model's reasoning rides along in the conversation, so it keeps its train of thought from one turn to the next. Tools Claude Code loads on demand (ToolSearch) become callable as they load, as Anthropic's servers would make them, and a web search runs on OpenAI's.
 
 The GPT rows reach `/model` through a `modelPicker` setting passed with `--settings`. Each "behaves as" `claude-sonnet-4-6`, a model Claude Code knows: that gives it a 200K context window, inside every GPT model's, so Claude Code compacts the conversation before a GPT model would run out of room. A per-session key keeps any other program on the machine from spending your plan through the router. `~/.claude-profiles/chatgpt/router.log` records each GPT request's model, status and token counts, and never a prompt or a token.
 
 ### Limits
 
 - **Usage figures.** OpenAI does not report how much of the plan is left on this route, so the picker and statusline cannot show it; [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage) does. When the plan or ccc's share runs out, Claude Code says so with that link.
-- **Claude-only tools.** Anthropic's server-side tools, web search among them, run on Anthropic's servers, so a GPT model goes without them.
+- **Web search** runs on OpenAI's search when a GPT model asks Claude Code's WebSearch tool, so it counts against your ChatGPT plan too. Anthropic's other server-side tools, such as code execution, run on Anthropic's servers, so a GPT model goes without them.
 - **A GPT model saved as the default.** `/model` can save a GPT model as an account's default. `ccc` then adds the GPT models whenever it starts that account, but a plain `claude` cannot run it — which matters only for the default profile, the one `claude` itself opens. `ccc repair` points it out.
 - **Not an Anthropic feature.** Claude Code supports other endpoints through `ANTHROPIC_BASE_URL`, but Anthropic does not support running it on non-Claude models. The GPT models were trained on Codex's tools rather than Claude Code's, so expect the odd rough edge.
 

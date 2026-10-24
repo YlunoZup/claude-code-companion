@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     printed or logged.
   - The GPT models reach `/model` as rows that behave as `claude-sonnet-4-6`,
     which gives them a 200K context window and the effort control.
+  - Tools Claude Code loads on demand through ToolSearch — WebFetch, WebSearch,
+    MCP tools — become callable on a GPT model once loaded, as Anthropic's
+    servers would make them, and Claude Code's WebSearch runs on OpenAI's own
+    web search.
   - The picker shows the ChatGPT account, and the statusline says
     `Using ChatGPT plan` on a GPT model instead of the Claude account's limits.
     OpenAI reports no usage figures on this route; the picker points at

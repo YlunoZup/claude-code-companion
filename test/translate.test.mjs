@@ -263,9 +263,12 @@ describe("tools", () => {
     { name: "mcp__server.with.dots__a_rather_long_tool_name_that_goes_on_and_on_and_on", description: "d", input_schema: { type: "object" } },
   ];
 
-  test("Claude Code's tools become functions; not-yet-loaded and server-side tools are left out", () => {
+  // The long-named tool, wherever it lands in the list.
+  const longOne = (request) => request.tools.find((t) => t.type === "function" && t.name !== "Bash");
+
+  test("Claude Code's tools become functions; tools not loaded yet are left out", () => {
     const { request } = toResponsesRequest(body({ tools }), opts());
-    assert.equal(request.tools.length, 2);
+    assert.deepEqual(request.tools.map((t) => t.type), ["function", "web_search", "function"]);
     assert.deepEqual(request.tools[0], {
       type: "function",
       name: "Bash",
@@ -273,14 +276,15 @@ describe("tools", () => {
       parameters: { type: "object", properties: { command: { type: "string" } } },
       strict: false,
     });
+    assert.ok(!request.tools.some((t) => t.name === "DeferredToolPlaceholder"));
   });
 
   test("a name OpenAI would refuse is shortened, the same way every time, and maps back", () => {
     const first = toResponsesRequest(body({ tools }), opts());
     const second = toResponsesRequest(body({ tools }), opts());
-    const sent = first.request.tools[1].name;
+    const sent = longOne(first.request).name;
     assert.match(sent, /^[A-Za-z0-9_-]{1,64}$/);
-    assert.equal(second.request.tools[1].name, sent);
+    assert.equal(longOne(second.request).name, sent);
     assert.equal(first.names.original(sent), tools[3].name);
     assert.equal(first.names.original("Bash"), "Bash");
   });
@@ -290,7 +294,45 @@ describe("tools", () => {
       body({ tools, messages: [{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: tools[3].name, input: {} }] }] }),
       opts()
     );
-    assert.equal(request.input[1].name, request.tools[1].name);
+    assert.equal(request.input[1].name, longOne(request).name);
+  });
+
+  // Claude Code keeps a loaded tool marked defer_loading and leaves it to
+  // Anthropic's servers to make it callable once ToolSearch has referenced it.
+  test("a deferred tool counts once ToolSearch has loaded it in the conversation", () => {
+    const deferred = [
+      { name: "ToolSearch", description: "find tools", input_schema: { type: "object", properties: { query: { type: "string" } } } },
+      { name: "WebFetch", description: "fetch", input_schema: { type: "object" }, defer_loading: true },
+      { name: "NotebookEdit", description: "edit", input_schema: { type: "object" }, defer_loading: true },
+      { name: "DeferredToolPlaceholder", description: "never call", input_schema: { type: "object" }, defer_loading: true },
+    ];
+    const before = toResponsesRequest(body({ tools: deferred }), opts()).request;
+    assert.deepEqual(before.tools.map((t) => t.name), ["ToolSearch"]);
+
+    const messages = [
+      { role: "user", content: "fetch it" },
+      { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "ToolSearch", input: { query: "select:WebFetch" } }] },
+      { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "tool_reference", tool_name: "WebFetch" }] }] },
+    ];
+    const after = toResponsesRequest(body({ tools: deferred, messages }), opts()).request;
+    assert.deepEqual(after.tools.map((t) => t.name), ["ToolSearch", "WebFetch"]);
+    assert.equal(after.input[2].output, "Tool WebFetch is loaded and can be called now.");
+  });
+
+  test("Anthropic's web search becomes OpenAI's, asking for the pages it read", () => {
+    const search = { type: "web_search_20250305", name: "web_search", max_uses: 8 };
+    const { request } = toResponsesRequest(
+      body({ tools: [search], tool_choice: { type: "tool", name: "web_search" }, thinking: { type: "disabled" }, messages: [{ role: "user", content: "Perform a web search for the query: node lts" }] }),
+      opts()
+    );
+    assert.deepEqual(request.tools, [{ type: "web_search" }]);
+    assert.deepEqual(request.tool_choice, { type: "web_search" });
+    assert.deepEqual(request.include, ["reasoning.encrypted_content", "web_search_call.action.sources"]);
+  });
+
+  test("Anthropic's other server-side tools are left out", () => {
+    const { request } = toResponsesRequest(body({ tools: [{ type: "code_execution_20250825", name: "code_execution" }] }), opts());
+    assert.equal("tools" in request, false);
   });
 
   test("tool choice maps across, and so does turning off parallel calls", () => {
@@ -389,6 +431,44 @@ describe("the answer", () => {
       { type: "response.completed", response: { usage } },
     ]);
     assert.deepEqual(t.message.content[0].input, {});
+  });
+
+  test("a search OpenAI ran becomes Anthropic's search blocks, its pages listed once each", () => {
+    const { t, emitted } = run([
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "web_search_call",
+          id: "ws_abc",
+          action: {
+            type: "search",
+            query: "node lts",
+            sources: [
+              { type: "url", url: "https://nodejs.org/en/download" },
+              { type: "url", url: "https://nodejs.org/en/download" },
+              { type: "url", url: "https://nodejs.org/en/about/previous-releases", title: "Releases" },
+            ],
+          },
+        },
+      },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "v24 is LTS." },
+      { type: "response.completed", response: { usage } },
+    ]);
+    assert.deepEqual(t.message.content, [
+      { type: "server_tool_use", id: "srvtoolu_abc", name: "web_search", input: { query: "node lts" } },
+      {
+        type: "web_search_tool_result",
+        tool_use_id: "srvtoolu_abc",
+        content: [
+          { type: "web_search_result", url: "https://nodejs.org/en/download", title: "https://nodejs.org/en/download", encrypted_content: "", page_age: null },
+          { type: "web_search_result", url: "https://nodejs.org/en/about/previous-releases", title: "Releases", encrypted_content: "", page_age: null },
+        ],
+      },
+      { type: "text", text: "v24 is LTS." },
+    ]);
+    assert.equal(t.message.stop_reason, "end_turn", "a search runs on the server, so the turn does not stop for it");
+    assert.equal(emitted.find((e) => e.data.content_block && e.data.content_block.type === "web_search_tool_result").data.content_block.content.length, 2);
   });
 
   test("an answer cut short by its token limit stops as max_tokens", () => {

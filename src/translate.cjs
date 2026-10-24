@@ -134,7 +134,7 @@ function toolResultParts(content) {
       const part = documentPart(block);
       if (part && part.type === "input_text") texts.push(part.text);
       else if (part) media.push(part);
-    } else if (block.type === "tool_reference") texts.push(`[tool loaded: ${block.tool_name}]`);
+    } else if (block.type === "tool_reference") texts.push(`Tool ${block.tool_name} is loaded and can be called now.`);
     else if (block.type === "search_result") {
       const body = (block.content || []).filter((b) => b && b.type === "text").map((b) => b.text).join("\n");
       texts.push([block.title, block.source, body].filter(Boolean).join("\n"));
@@ -238,16 +238,42 @@ function toInput(messages, wireName) {
 
 // ── Tools ────────────────────────────────────────────────────
 
-function toTools(tools, wireName) {
+const isWebSearch = (tool) => Boolean(tool && typeof tool.type === "string" && /^web_search/.test(tool.type));
+
+// The deferred tools ToolSearch has loaded in this conversation. Claude Code
+// marks them as loaded by the tool_reference blocks ToolSearch returns, and
+// from then on sends them with defer_loading still set, leaving it to
+// Anthropic's servers to make them callable — here that falls to the router.
+function loadedTools(messages) {
+  const loaded = new Set();
+  for (const message of messages || []) {
+    if (!message || !Array.isArray(message.content)) continue;
+    for (const block of message.content) {
+      if (!block || block.type !== "tool_result" || !Array.isArray(block.content)) continue;
+      for (const inner of block.content) if (inner && inner.type === "tool_reference" && inner.tool_name) loaded.add(String(inner.tool_name));
+    }
+  }
+  return loaded;
+}
+
+function toTools(tools, wireName, { loaded = new Set() } = {}) {
   const out = [];
+  let search = false;
   for (const tool of tools || []) {
     if (!tool || typeof tool !== "object" || !tool.name) continue;
-    // Not loaded yet: Claude Code adds such a tool to the list once the model
-    // asks ToolSearch for it.
-    if (tool.defer_loading) continue;
-    // Anthropic's server-side tools (web search, code execution, …) run on
+    // Anthropic's web search becomes OpenAI's: Claude Code's WebSearch tool
+    // asks the session's model to run it, and builds its results from what
+    // comes back.
+    if (isWebSearch(tool)) {
+      if (!search) out.push({ type: "web_search" });
+      search = true;
+      continue;
+    }
+    // Anthropic's other server-side tools (code execution and the like) run on
     // Anthropic's servers and cannot be offered to another model.
     if (tool.type && tool.type !== "custom") continue;
+    // A deferred tool counts once ToolSearch has loaded it.
+    if (tool.defer_loading && !loaded.has(tool.name)) continue;
     const parameters = tool.input_schema && typeof tool.input_schema === "object" ? { ...tool.input_schema } : { type: "object", properties: {} };
     delete parameters.$schema;
     if (!parameters.type) parameters.type = "object";
@@ -256,12 +282,15 @@ function toTools(tools, wireName) {
   return out;
 }
 
-function toToolChoice(choice, wireName) {
+function toToolChoice(choice, wireName, tools) {
   if (!choice || typeof choice !== "object") return undefined;
   if (choice.type === "auto") return "auto";
   if (choice.type === "any") return "required";
   if (choice.type === "none") return "none";
-  if (choice.type === "tool" && choice.name) return { type: "function", name: wireName(choice.name) };
+  if (choice.type === "tool" && choice.name) {
+    const named = (tools || []).find((t) => t && t.name === choice.name);
+    return isWebSearch(named) ? { type: "web_search" } : { type: "function", name: wireName(choice.name) };
+  }
   return undefined;
 }
 
@@ -321,10 +350,10 @@ function toResponsesRequest(body, opts) {
     stream: true,
   };
 
-  const tools = toTools(body.tools, names.wire);
+  const tools = toTools(body.tools, names.wire, { loaded: loadedTools(body.messages) });
   if (tools.length) {
     request.tools = tools;
-    const choice = toToolChoice(body.tool_choice, names.wire);
+    const choice = toToolChoice(body.tool_choice, names.wire, body.tools);
     if (choice !== undefined) request.tool_choice = choice;
     if (body.tool_choice && body.tool_choice.disable_parallel_tool_use && !omit.has("parallel_tool_calls")) {
       request.parallel_tool_calls = false;
@@ -336,7 +365,11 @@ function toResponsesRequest(body, opts) {
   if (thinking.type !== "disabled" && thinking.display !== "omitted" && !omit.has("reasoning.summary")) {
     request.reasoning.summary = "auto";
   }
-  if (!omit.has("include")) request.include = ["reasoning.encrypted_content"];
+  if (!omit.has("include")) {
+    request.include = ["reasoning.encrypted_content"];
+    // The pages a search read, for the results Claude Code lists.
+    if (tools.some((t) => t.type === "web_search")) request.include.push("web_search_call.action.sources");
+  }
 
   const format = body.output_config && body.output_config.format;
   if (format && format.type === "json_schema" && format.schema && !omit.has("text")) {
@@ -422,7 +455,7 @@ class StreamTranslator {
   closeBlock(key) {
     const state = this.open.get(key);
     if (!state) return;
-    if (state.kind === "tool_use") {
+    if (state.kind === "tool_use" || state.kind === "server_tool_use") {
       let input = {};
       try {
         input = state.args ? JSON.parse(state.args) : {};
@@ -457,6 +490,33 @@ class StreamTranslator {
     this.done = true;
     this.error = error;
     this.emit("error", { type: "error", error: { type: error.type, message: error.message } });
+  }
+
+  // A search OpenAI ran, as the pair of blocks Anthropic's web search gives:
+  // what was searched for, then the pages found. Claude Code's WebSearch tool
+  // lists those pages as the search's links.
+  webSearch(item, outputIndex) {
+    this.start();
+    const action = item.action || {};
+    const query = action.query || (Array.isArray(action.queries) && action.queries[0]) || "";
+    const id = `srvtoolu_${String(item.id || outputIndex).replace(/^ws_/, "")}`;
+    const call = `${outputIndex}:search`;
+    this.openBlock(call, { type: "server_tool_use", id, name: "web_search", input: {} });
+    this.delta(call, { type: "input_json_delta", partial_json: JSON.stringify({ query }) });
+    this.closeBlock(call);
+
+    const seen = new Set();
+    const results = [];
+    for (const source of action.sources || []) {
+      const url = source && source.url;
+      if (!url || seen.has(url)) continue;
+      seen.add(url);
+      results.push({ type: "web_search_result", url, title: source.title || url, encrypted_content: "", page_age: null });
+      if (results.length === 10) break;
+    }
+    const found = `${outputIndex}:results`;
+    this.openBlock(found, { type: "web_search_tool_result", tool_use_id: id, content: results });
+    this.closeBlock(found);
   }
 
   // One Responses event.
@@ -543,6 +603,8 @@ class StreamTranslator {
           this.closeBlock(key);
         } else if (item.type === "message") {
           for (const key of [...this.open.keys()]) if (key.startsWith(`${event.output_index}:text:`)) this.closeBlock(key);
+        } else if (item.type === "web_search_call") {
+          this.webSearch(item, event.output_index);
         }
         return;
 
@@ -651,6 +713,7 @@ module.exports = {
   parseReasoning,
   isGptReasoning,
   toInput,
+  loadedTools,
   toTools,
   toToolChoice,
   toInstructions,
