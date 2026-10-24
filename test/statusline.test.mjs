@@ -413,6 +413,24 @@ describe("GPT models", () => {
     }
   });
 
+  // A GPT row behaves as a 1M Claude model, so Claude Code reports 1M; the
+  // window that applies is the GPT model's own.
+  test("a GPT model's context is shown against its own window", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(join(sb.profilesDir, "chatgpt", "models.json"), { fetchedAt: Date.now(), models: [{ id: "gpt-6-luna", contextWindow: 272000 }] });
+      const ctx = { used_percentage: 14, context_window_size: 1000000, current_usage: { input_tokens: 1000, cache_creation_input_tokens: 15000, cache_read_input_tokens: 120000, output_tokens: 900 } };
+      const window = statusline.gptModel("gpt-6-luna", { home: sb.home }).window;
+      assert.equal(window, 272000);
+      assert.equal(stripAnsi(statusline.contextLabel(ctx, window)), "ctx 136k/272k (50%)");
+      assert.equal(stripAnsi(statusline.contextLabel(ctx)), "ctx 140k/1000k (14%)", "a Claude model's figures stay as reported");
+      assert.equal(statusline.gptModel("gpt-unlisted", { home: sb.home }).window, 272000, "an unlisted GPT model gets the usual window");
+      assert.equal(statusline.gptModel("claude-opus-5-5", { home: sb.home }), null);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
   // The rate limits Claude Code passes in are the Claude account's, left over
   // from its last Claude reply; on a GPT model they would mislead.
   test("on a GPT model the line says the ChatGPT plan is paying, in place of the Claude limits", () => {

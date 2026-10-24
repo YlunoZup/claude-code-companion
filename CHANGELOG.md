@@ -26,8 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the Codex app's: OpenAI rotates refresh tokens, so sharing one would sign
     the app out. Refreshes are serialised across sessions; tokens are never
     printed or logged.
-  - The GPT models reach `/model` as rows that behave as `claude-sonnet-4-6`,
-    which gives them a 200K context window and the effort control.
+  - The GPT models reach `/model` as rows that behave as `claude-sonnet-5`,
+    for the effort control, each with its own context window: the one OpenAI
+    states and Codex uses — 500K for GPT-6.1-Sol, 272K for the others — set as
+    a per-model auto-compact window. The statusline measures a GPT model's
+    context against that window.
   - Tools Claude Code loads on demand through ToolSearch — WebFetch, WebSearch,
     MCP tools — become callable on a GPT model once loaded, as Anthropic's
     servers would make them, and Claude Code's WebSearch runs on OpenAI's own

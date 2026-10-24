@@ -135,13 +135,27 @@ const formatTokens = (n) => (n >= 1000 ? (n / 1000).toFixed(0) + "k" : String(n)
 
 // "ctx 74k/200k (37%)": green below half full, amber below 80%, red from there.
 // Empty until Claude Code reports the window.
-function contextLabel(ctx) {
+//
+// window, when given, is the size that really applies. A GPT model reports the
+// 1M of the Claude model it behaves as, while its own window is smaller; the
+// share is then worked out from the tokens Claude Code says are in use.
+function contextLabel(ctx, window) {
   if (!ctx || typeof ctx !== "object") return "";
-  const { used_percentage: used, context_window_size: size } = ctx;
-  if (used === null || used === undefined || !size) return "";
+  const { used_percentage: used, context_window_size: reported, current_usage: current } = ctx;
+  if (used === null || used === undefined || !reported) return "";
 
-  const pct = Math.round(used);
-  const tokens = Math.round((pct / 100) * size);
+  let size = reported;
+  let pct = Math.round(used);
+  let tokens = Math.round((pct / 100) * size);
+  if (window && window < reported) {
+    const counted =
+      current && typeof current === "object"
+        ? ["input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"].reduce((n, k) => n + (Number(current[k]) || 0), 0)
+        : Math.round((used / 100) * reported);
+    size = window;
+    tokens = counted;
+    pct = Math.min(100, Math.round((counted / window) * 100));
+  }
   const color = pct < 50 ? GREEN : pct < 80 ? AMBER : RED;
   return `${DIM}ctx${RESET} ${fg(color)}${BOLD}${formatTokens(tokens)}/${formatTokens(size)} (${pct}%)${RESET}`;
 }
@@ -178,14 +192,21 @@ function limitsLabel(limits, now = Date.now()) {
 
 // ── GPT models ───────────────────────────────────────────────
 
-// Whether the session is on one of the GPT models ccc's router serves: one the
-// ChatGPT sign-in last listed, or a name only OpenAI uses.
-function isGptModel(id, { home = HOME } = {}) {
+// The GPT model ccc's router serves under this name — one the ChatGPT sign-in
+// last listed, or a name only OpenAI uses — as { window }, its context window
+// as the router sets it. null for any other model.
+function gptModel(id, { home = HOME } = {}) {
   const bare = String(id || "").replace(/\[\d+m\]$/i, "");
-  if (!bare) return false;
-  if (/^(gpt-|o\d|codex-)/i.test(bare)) return true;
+  if (!bare) return null;
   const cached = profiles.readJsonFile(join(home, ".claude-profiles", "chatgpt", "models.json"));
-  return cached.status === "ok" && Array.isArray(cached.value.models) && cached.value.models.some((m) => m && m.id === bare);
+  const listed = cached.status === "ok" && Array.isArray(cached.value.models) ? cached.value.models.find((m) => m && m.id === bare) : undefined;
+  if (!listed && !/^(gpt-|o\d|codex-)/i.test(bare)) return null;
+  const stated = Number(listed && listed.contextWindow) || 272000;
+  return { window: Math.min(1000000, Math.max(100000, stated)) };
+}
+
+function isGptModel(id, opts) {
+  return gptModel(id, opts) !== null;
 }
 
 // A GPT model runs on the ChatGPT plan, so the Claude account's limits say
@@ -221,8 +242,9 @@ function render(session, configDir, { home = HOME, configPath = CONFIG_PATH, now
   if (branch) segments.push({ text: BRANCH_MARK + branch, color: COLORS.git });
   if (dir) segments.push({ text: dir, color: COLORS.dir });
 
-  const context = contextLabel(data.context_window);
-  const limits = isGptModel(data.model && data.model.id, { home }) ? CHATGPT_PLAN_LABEL : limitsLabel(data.rate_limits, now);
+  const gpt = gptModel(data.model && data.model.id, { home });
+  const context = contextLabel(data.context_window, gpt && gpt.window);
+  const limits = gpt ? CHATGPT_PLAN_LABEL : limitsLabel(data.rate_limits, now);
   return renderSegments(segments) + (context ? "  " + context : "") + (limits ? "  " + limits : "");
 }
 
@@ -252,6 +274,7 @@ module.exports = {
   shortenDir,
   contextLabel,
   limitsLabel,
+  gptModel,
   isGptModel,
   renderSegments,
   render,

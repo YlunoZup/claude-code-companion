@@ -12,9 +12,11 @@
 //                      signed with the ChatGPT sign-in from chatgpt.cjs
 //
 // The GPT models reach the /model picker through a modelPicker setting handed to
-// Claude Code with --settings. Each row "behaves as" claude-sonnet-4-6, a model
-// this Claude Code knows: that gives it a 200K context window, inside every GPT
-// model's, and the effort control.
+// Claude Code with --settings. Each row "behaves as" claude-sonnet-5, a model
+// this Claude Code knows, which gives it the effort control and a 1M window;
+// a per-model auto-compact window then brings that down to the GPT model's own
+// context window, the one Codex uses for it, so Claude Code compacts before
+// the model runs out of room.
 //
 // The server lives exactly as long as the Claude Code it starts. Nothing here
 // writes to the terminal while Claude Code is running; problems go to
@@ -32,7 +34,13 @@ const chatgpt = require("./chatgpt.cjs");
 const translate = require("./translate.cjs");
 
 const DEFAULT_UPSTREAM = "https://api.anthropic.com";
-const BEHAVES_AS = "claude-sonnet-4-6";
+const BEHAVES_AS = "claude-sonnet-5";
+
+// Claude Code accepts an auto-compact window between these. A model whose window
+// OpenAI does not state gets the one most GPT models have.
+const MIN_WINDOW = 100000;
+const MAX_WINDOW = 1000000;
+const FALLBACK_WINDOW = 272000;
 const ROUTER_KEY_HEADER = "x-ccc-router-key";
 
 // Claude Code gives up on a stream that sends nothing for a while, and a GPT
@@ -498,14 +506,22 @@ function createRouter(opts) {
 
 // ── What Claude Code is started with ─────────────────────────
 
-// The /model rows for the GPT models. On the ChatGPT account they replace the
-// built-in Claude lineup; on a Claude account they are added after it.
+// A GPT model's context window, as Claude Code's auto-compact window.
+function windowFor(model) {
+  const stated = Number(model && model.contextWindow) || FALLBACK_WINDOW;
+  return Math.min(MAX_WINDOW, Math.max(MIN_WINDOW, stated));
+}
+
+// The /model rows for the GPT models, and each one's context window. On the
+// ChatGPT account the rows replace the built-in Claude lineup; on a Claude
+// account they are added after it.
 function pickerSettings(models, { mode, planLabel }) {
   return {
     modelPicker: {
       options: models.map((m) => ({ model: m.id, label: m.name, description: `${planLabel} plan`, behavesAs: BEHAVES_AS })),
       ...(mode === "gpt" ? { replaceBuiltInOptions: true } : {}),
     },
+    modelSettings: Object.fromEntries(models.map((m) => [m.id, { autoCompactWindow: windowFor(m) }])),
   };
 }
 
@@ -534,9 +550,11 @@ function withSettings(args, ours, file) {
     } catch {}
     if (parsed && typeof parsed === "object") {
       const picker = parsed.modelPicker && Array.isArray(parsed.modelPicker.options) ? parsed.modelPicker : null;
+      const their = parsed.modelSettings && typeof parsed.modelSettings === "object" ? parsed.modelSettings : {};
       settings = {
         ...parsed,
         modelPicker: picker ? { ...picker, options: [...picker.options, ...ours.modelPicker.options] } : ours.modelPicker,
+        modelSettings: { ...their, ...ours.modelSettings },
       };
     }
   }
@@ -562,8 +580,9 @@ function childEnv(mode, env, { port, key, resolver }) {
     }
     out.ANTHROPIC_DEFAULT_HAIKU_MODEL = small.id;
     out.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME = small.name;
-    // A "[1m]" variant would let Claude Code fill a context no GPT model has.
-    out.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
+    // Not CLAUDE_CODE_DISABLE_1M_CONTEXT: it would cap every model at 200K,
+    // below the windows the rows' auto-compact settings give.
+    delete out.CLAUDE_CODE_DISABLE_1M_CONTEXT;
   } else {
     // The account's own Claude login stays in charge; the key rides along as
     // one more header, which the router takes off again before Anthropic.
@@ -734,6 +753,7 @@ module.exports = {
   DEFAULT_UPSTREAM,
   BEHAVES_AS,
   ROUTER_KEY_HEADER,
+  windowFor,
   PING_MS,
   decodeBody,
   sseParser,

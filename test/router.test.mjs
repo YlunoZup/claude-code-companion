@@ -477,11 +477,30 @@ describe("when OpenAI says no", () => {
 });
 
 describe("what Claude Code is started with", () => {
-  test("the GPT models become /model rows that behave as a 200K Claude model", () => {
+  test("the GPT models become /model rows that behave as a Claude model Claude Code knows", () => {
     const settings = router.pickerSettings(MODELS, { mode: "mixed", planLabel: "ChatGPT" });
-    assert.deepEqual(settings.modelPicker.options[0], { model: "gpt-6.1-sol", label: "GPT-6.1-Sol", description: "ChatGPT plan", behavesAs: "claude-sonnet-4-6" });
+    assert.deepEqual(settings.modelPicker.options[0], { model: "gpt-6.1-sol", label: "GPT-6.1-Sol", description: "ChatGPT plan", behavesAs: "claude-sonnet-5" });
     assert.equal("replaceBuiltInOptions" in settings.modelPicker, false, "a Claude account keeps its own models");
     assert.equal(router.pickerSettings(MODELS, { mode: "gpt", planLabel: "ChatGPT" }).modelPicker.replaceBuiltInOptions, true);
+  });
+
+  // The rows behave as a 1M model; each GPT model's own window, the one Codex
+  // uses, is what Claude Code compacts by.
+  test("each GPT model gets its own context window", () => {
+    const models = [
+      { id: "gpt-6.1-sol", name: "GPT-6.1-Sol", contextWindow: 500000 },
+      { id: "gpt-6-luna", name: "GPT-6-Luna", contextWindow: 272000 },
+      { id: "gpt-new", name: "New" },
+      { id: "gpt-tiny", name: "Tiny", contextWindow: 8000 },
+      { id: "gpt-huge", name: "Huge", contextWindow: 2000000 },
+    ];
+    assert.deepEqual(router.pickerSettings(models, { mode: "gpt", planLabel: "ChatGPT" }).modelSettings, {
+      "gpt-6.1-sol": { autoCompactWindow: 500000 },
+      "gpt-6-luna": { autoCompactWindow: 272000 },
+      "gpt-new": { autoCompactWindow: 272000 },
+      "gpt-tiny": { autoCompactWindow: 100000 },
+      "gpt-huge": { autoCompactWindow: 1000000 },
+    }, "an unstated window gets the usual one; Claude Code takes 100K to 1M");
   });
 
   test("--settings is added, and the user's own --settings is merged into it", () => {
@@ -492,11 +511,16 @@ describe("what Claude Code is started with", () => {
       assert.deepEqual(router.withSettings(["-c", "hello"], ours, file), ["--settings", file, "-c", "hello"]);
       assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), ours);
 
-      const args = router.withSettings(["--settings", '{"theme":"light","modelPicker":{"options":[{"model":"opus","label":"Mine"}]}}', "-c"], ours, file);
+      const args = router.withSettings(
+        ["--settings", '{"theme":"light","modelPicker":{"options":[{"model":"opus","label":"Mine"}]},"modelSettings":{"opus":{"effortLevel":"low"}}}', "-c"],
+        ours,
+        file
+      );
       assert.deepEqual(args, ["--settings", file, "-c"]);
       const merged = JSON.parse(readFileSync(file, "utf8"));
       assert.equal(merged.theme, "light");
       assert.deepEqual(merged.modelPicker.options.map((o) => o.model), ["opus", "gpt-6.1-sol", "gpt-6-luna"]);
+      assert.deepEqual(Object.keys(merged.modelSettings), ["opus", "gpt-6.1-sol", "gpt-6-luna"]);
 
       const theirs = join(sb.root, "theirs.json");
       writeFileSync(theirs, JSON.stringify({ verbose: true }));
@@ -509,7 +533,7 @@ describe("what Claude Code is started with", () => {
 
   test("the ChatGPT account replaces the Claude login with the router's key and points every model at GPT", () => {
     const resolver = router.modelResolver(MODELS, "gpt");
-    const env = router.childEnv("gpt", { PATH: "p", ANTHROPIC_API_KEY: "sk-ant", CLAUDE_CODE_OAUTH_TOKEN: "oat" }, { port: 1234, key: KEY, resolver });
+    const env = router.childEnv("gpt", { PATH: "p", ANTHROPIC_API_KEY: "sk-ant", CLAUDE_CODE_OAUTH_TOKEN: "oat", CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" }, { port: 1234, key: KEY, resolver });
     assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:1234");
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, KEY);
     assert.equal(env.ANTHROPIC_API_KEY, undefined);
@@ -517,7 +541,7 @@ describe("what Claude Code is started with", () => {
     assert.equal(env.ANTHROPIC_DEFAULT_OPUS_MODEL, "gpt-6.1-sol");
     assert.equal(env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME, "GPT-6.1-Sol");
     assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, "gpt-6-luna");
-    assert.equal(env.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1");
+    assert.equal(env.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined, "it would cap every model at 200K");
     assert.equal(env.PATH, "p");
   });
 
@@ -611,6 +635,8 @@ process.exit(Number(process.env.CCC_TEST_EXIT || 0));
     assert.match(out.env.ANTHROPIC_BASE_URL, /^http:\/\/127\.0\.0\.1:\d+$/);
     assert.ok(out.env.ANTHROPIC_AUTH_TOKEN && out.env.ANTHROPIC_AUTH_TOKEN.length >= 32);
     assert.equal(out.env.ANTHROPIC_DEFAULT_OPUS_MODEL, "gpt-6.1-sol");
+    assert.equal(out.env.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined);
+    assert.deepEqual(out.settings.modelSettings["gpt-6.1-sol"], { autoCompactWindow: 272000 });
     assert.equal(out.env.CCC_ROUTER, "gpt");
     assert.equal(existsSync(out.args[1]), false, "the session's settings file is cleaned up");
   });
