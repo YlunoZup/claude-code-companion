@@ -159,7 +159,9 @@ export function makeSandbox(opts = {}) {
     },
 
     cleanup() {
-      rmSync(root, { recursive: true, force: true });
+      // Windows will not remove a directory a process is still running in, and
+      // the claude behind a usage request can outlive its answer by a moment.
+      rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
     },
   };
 }

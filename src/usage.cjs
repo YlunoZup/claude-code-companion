@@ -89,6 +89,17 @@ function spawnClaude(command, args, options, platform) {
   });
 }
 
+// On Windows cmd.exe stands between this process and claude, and killing it
+// leaves claude running on its own; take the whole tree down instead.
+function stop(child, platform) {
+  if ((platform || process.platform) !== "win32") {
+    child.kill();
+    return;
+  }
+  if (!child.pid) return;
+  spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+}
+
 // Live usage for one profile: configDir is its CLAUDE_CONFIG_DIR, or null for
 // the default ~/.claude profile. Never rejects; a failure comes back as
 // { status: "error", error }.
@@ -118,7 +129,7 @@ function fetchUsage(configDir, opts = {}) {
     };
     const timer = setTimeout(() => {
       finish({ status: "error", error: "timed out" });
-      child.kill();
+      stop(child, platform);
     }, timeoutMs);
 
     const onLine = (line) => {
