@@ -108,21 +108,6 @@ info "Installing statusline..."
 cp "$SCRIPT_DIR/src/statusline.js" "$PROFILES_DIR/statusline.js"
 ok "Installed statusline.js -> $PROFILES_DIR/statusline.js"
 
-if [[ ! -f "$PROFILES_DIR/claude-powerline.json" ]]; then
-    cp "$SCRIPT_DIR/config/claude-powerline.json" "$PROFILES_DIR/claude-powerline.json"
-    ok "Installed claude-powerline.json"
-else
-    ok "claude-powerline.json already exists, skipping"
-fi
-
-# Check for claude-powerline
-if ! command -v claude-powerline &>/dev/null; then
-    warn "claude-powerline not found. Install it for statusline segments:"
-    printf '    %bnpm install -g claude-powerline%b\n\n' "$BOLD" "$RESET"
-else
-    ok "claude-powerline found"
-fi
-
 # ── Configure statusline in settings.json ────────────────────
 # profiles.cjs merges the statusLine key and leaves every other key alone. It
 # refuses outright if the file exists but cannot be parsed, rather than
@@ -229,8 +214,8 @@ printf '    %bccc 2%b        Launch with Account 2\n' "$CYAN" "$RESET"
 printf '    %bccc 2 -c%b     Launch Account 2 in continue mode\n' "$CYAN" "$RESET"
 echo ""
 printf '  %bStatusline:%b\n' "$BOLD" "$RESET"
-echo "    Configured automatically. Your Claude Code sessions"
-echo "    will show the account badge and powerline segments."
+echo "    Configured automatically. Your Claude Code sessions will show"
+echo "    the account, model, git branch, directory and context usage."
 echo ""
 printf '  %bFirst-time setup for Account 2:%b\n' "$BOLD" "$RESET"
 printf '    Run %bccc 2%b and log in when prompted.\n' "$CYAN" "$RESET"

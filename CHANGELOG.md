@@ -70,23 +70,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Missing dependencies fail loudly. A missing `node`, `picker.mjs` or `claude` used
   to leak a raw stack trace from `ccc` and still exit 0, so the caller saw success
   while nothing had launched.
-- The statusline passes its config path to `claude-powerline` as an argument rather
-  than through a shell string, so a `$` or a backtick in the home directory can no
-  longer change what runs.
 - The installer resolves and checks the install destination before it changes
   anything, so a bad argument no longer aborts halfway through.
-- The claude-powerline timeout is overridable with `CCC_POWERLINE_TIMEOUT_MS`. It
-  was hardcoded at 5 seconds, which a loaded machine or a large transcript history
-  can legitimately exceed — and when it does, the segments silently vanish.
 - Documentation: the Keychain service example hash was wrong; "How It Works" claimed
   `settings.json` is shared when it deliberately is not; the uninstall steps did not
   mention that macOS Keychain entries survive `rm -rf ~/.claude-profiles`.
 
 ### Changed
 
+- **The statusline is self-contained.** `statusline.js` renders the account, model,
+  git branch, working directory and context window usage itself, with nothing
+  beyond Node, instead of running `claude-powerline` on every refresh. Every
+  account's segment is now the same purple; the name, not the colour, says which
+  account is active. The directory is shortened to `~` and its last two
+  components, and a path outside home is never shown under `~`. git is given one
+  second to name the branch; `CCC_GIT_TIMEOUT_MS` changes that.
 - `ccc` now requires `node` on `PATH` for every operation, with a clear message when
   it is missing. Claude Code is itself a Node CLI, so a `ccc` that "worked" without
   node only ever exec'd a `claude` that immediately failed.
 - Shared-data links are created by Node rather than `ln -s` / `mklink`. On Windows
   this means a junction, which needs no administrator rights and — unlike Git Bash's
   `ln -s` — does not silently deep-copy the tree.
+
+### Removed
+
+- The claude-powerline integration, and with it `config/claude-powerline.json`, the
+  shared `today.json` cache invalidation, and `CCC_POWERLINE_TIMEOUT_MS`. Neither
+  installer copies that file or looks for `claude-powerline` any more. An existing
+  `~/.claude-profiles/claude-powerline.json` is left where it is, unused.

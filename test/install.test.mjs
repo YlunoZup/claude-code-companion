@@ -18,14 +18,7 @@ describe("install.sh", () => {
       const r = sb.install();
       assert.equal(r.status, 0, r.stderr);
 
-      for (const f of [
-        "profiles.cjs",
-        "picker.mjs",
-        "statusline.js",
-        "config.json",
-        "claude-powerline.json",
-        "package.json",
-      ]) {
+      for (const f of ["profiles.cjs", "picker.mjs", "statusline.js", "config.json", "package.json"]) {
         assert.ok(existsSync(join(sb.profilesDir, f)), `missing ${f}`);
       }
       assert.ok(existsSync(join(sb.home, ".local", "bin", "ccc")), "launcher not installed");
@@ -266,17 +259,6 @@ describe("install.sh", () => {
         const r = sb.install();
         assert.notEqual(r.status, 0);
         assert.match(r.stdout + r.stderr, /Node\.js is required/);
-      } finally {
-        sb.cleanup();
-      }
-    });
-
-    test("only warns when claude-powerline is absent", () => {
-      const sb = makeSandbox({ powerline: false });
-      try {
-        const r = sb.install();
-        assert.equal(r.status, 0, "an optional dependency must not fail the install");
-        assert.match(r.stdout, /claude-powerline not found/);
       } finally {
         sb.cleanup();
       }

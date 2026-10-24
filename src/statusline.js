@@ -1,12 +1,16 @@
-// statusline.js - the account badge Claude Code renders, plus claude-powerline
+// statusline.js - the Claude Code status line, for every account
+//
+// Renders: account · model · git branch · working directory · context usage,
+// using nothing beyond Node itself. Which account is active comes from
+// CLAUDE_CONFIG_DIR, which ccc exports before launching Claude Code.
 //
 // CommonJS on purpose, and it keeps the .js extension because existing
 // settings.json files point at this exact filename. The installer drops a
 // {"type": "commonjs"} package.json next to it so an unrelated ~/package.json
 // declaring {"type": "module"} cannot turn it into an ES module.
 
-const { execSync, execFileSync } = require("child_process");
-const { readFileSync, existsSync, writeFileSync, mkdirSync, unlinkSync } = require("fs");
+const { execFileSync } = require("child_process");
+const { readFileSync } = require("fs");
 const { homedir } = require("os");
 const { join, basename, normalize } = require("path");
 const profiles = require("./profiles.cjs");
@@ -14,23 +18,41 @@ const profiles = require("./profiles.cjs");
 const HOME = homedir();
 const PROFILES_DIR = join(HOME, ".claude-profiles");
 const CONFIG_PATH = join(PROFILES_DIR, "config.json");
-const POWERLINE_CONFIG = join(PROFILES_DIR, "claude-powerline.json");
 
-// Shared powerline cache — invalidate when account changes
-const CACHE_DIR = join(HOME, ".claude", "powerline", "usage");
-const ACCOUNT_MARKER = join(CACHE_DIR, ".last-account");
-const TODAY_CACHE = join(CACHE_DIR, "today.json");
+// Bounded so a wedged git cannot stall the statusline. Overridable because a
+// loaded machine, or a repository on a slow network drive, can need longer.
+const GIT_TIMEOUT_MS = Number(process.env.CCC_GIT_TIMEOUT_MS) || 1000;
 
 const debug = (msg) => {
   if (process.env.CCC_STATUSLINE_DEBUG) process.stderr.write(`statusline: ${msg}\n`);
 };
 
-// ── Account identity ─────────────────────────────────────────
+// ── Colours ──────────────────────────────────────────────────
 
-// Which account is active, as a stable id for the cache marker.
-function accountIdFor(configDir) {
-  return configDir ? basename(normalize(configDir)) : "__default__";
-}
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const DIM = "\x1b[2m";
+const fg = ([r, g, b]) => `\x1b[38;2;${r};${g};${b}m`;
+const bg = ([r, g, b]) => `\x1b[48;2;${r};${g};${b}m`;
+
+const WHITE = [255, 255, 255];
+const COLORS = {
+  account: [99, 66, 245], // purple
+  model: [30, 130, 180], // teal
+  git: [40, 167, 70], // green
+  dir: [60, 60, 70], // slate
+};
+
+// Drawn after each segment, in that segment's colour. Empty keeps the segments
+// flush, which looks the same in any font. "\uE0B0" draws Powerline arrows
+// instead, for a terminal using a Nerd Font or a Powerline-patched font.
+const SEPARATOR = "";
+
+// Put in front of the branch name. "\uE0A0 " is the Powerline branch symbol,
+// for the same fonts.
+const BRANCH_MARK = " ";
+
+// ── Account ──────────────────────────────────────────────────
 
 // Look the name up in config.json for every account, including the default one.
 // No CLAUDE_CONFIG_DIR means the default profile, which is the entry whose
@@ -61,65 +83,91 @@ function resolveAccountName(configDir, { home = HOME, configPath = CONFIG_PATH }
   return dirName || "Account 1";
 }
 
-// Purple for the default profile, orange for the others.
-function buildBadge(name, configDir) {
-  const accentRgb = configDir ? "230;126;34" : "99;66;245";
-  return (
-    `\x1b[48;2;${accentRgb}m\x1b[38;2;255;255;255m\x1b[1m \u{1F464} ${name} \x1b[0m` +
-    `\x1b[38;2;${accentRgb}m\x1b[0m`
-  );
-}
+// ── Git branch ───────────────────────────────────────────────
 
-// ── claude-powerline ─────────────────────────────────────────
-
-// The config path used to be interpolated into a shell command string, so a $,
-// a backtick or a quote anywhere in the home directory changed what ran. On
-// POSIX there is no shell here at all now.
-function runPowerline(input, configPath, platform) {
-  const args = ["--style=powerline"];
-  if (configPath) args.push("--config", configPath);
-
-  // Bounded so a slow or wedged claude-powerline cannot stall the statusline.
-  // Overridable because "slow" depends on the machine and on how much history
-  // there is to scan — a loaded CI box or a large transcript can legitimately
-  // need longer than the default.
-  const timeout = Number(process.env.CCC_POWERLINE_TIMEOUT_MS) || 5000;
-  const opts = { input, encoding: "utf8", timeout, stdio: ["pipe", "pipe", "pipe"] };
-
-  if ((platform || process.platform) === "win32") {
-    // npm installs claude-powerline as a .cmd shim, which cannot be run without
-    // a shell. A Windows path cannot contain a double quote and cmd.exe expands
-    // neither $ nor backticks, so quoting the arguments is enough there.
-    const quoted = args.map((a) => (/[\s&^|<>()]/.test(a) ? `"${a}"` : a)).join(" ");
-    return execSync(`claude-powerline ${quoted}`, opts).trim();
-  }
-
-  return execFileSync("claude-powerline", args, opts).trim();
-}
-
-// ── Cache invalidation ───────────────────────────────────────
-
-// All accounts share ~/.claude/powerline/usage, so the today cache has to go
-// when the active account changes or it reports the previous account's spend.
-function invalidateCacheOnAccountChange(accountId) {
+// Empty outside a repository, and on a detached HEAD, which has no branch to
+// show. git is run directly rather than through a shell, so this works the
+// same way on Windows.
+function gitBranch(cwd, timeout = GIT_TIMEOUT_MS) {
   try {
-    mkdirSync(CACHE_DIR, { recursive: true });
-    let lastAccount = "";
-    try {
-      lastAccount = readFileSync(ACCOUNT_MARKER, "utf8").trim();
-    } catch {}
-
-    if (lastAccount !== accountId) {
-      try {
-        unlinkSync(TODAY_CACHE);
-      } catch {}
-      writeFileSync(ACCOUNT_MARKER, accountId, "utf8");
-      return true;
-    }
+    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      cwd,
+      encoding: "utf8",
+      timeout,
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    }).trim();
+    return branch === "HEAD" ? "" : branch;
   } catch (err) {
-    debug(`cache invalidation skipped: ${err.message}`);
+    debug(`no git branch for ${cwd}: ${err.message}`);
+    return "";
   }
-  return false;
+}
+
+// ── Working directory ────────────────────────────────────────
+
+// "~" for home itself, and anything more than two levels below it cut to its
+// last two components: ~/work/clients/acme/api shows as ~/acme/api. Only a path
+// that really is inside home gets a ~ — /Users/me2 is not inside /Users/me just
+// because it starts with the same characters.
+function shortenDir(cwd, home = HOME) {
+  if (!cwd) return "";
+  if (cwd === home) return "~";
+
+  const inHome = Boolean(home) && (cwd.startsWith(home + "/") || cwd.startsWith(home + "\\"));
+  const parts = (inHome ? cwd.slice(home.length + 1) : cwd).split(/[\\/]/).filter(Boolean);
+  if (inHome) return "~/" + parts.slice(-2).join("/");
+  return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : cwd;
+}
+
+// ── Context window ───────────────────────────────────────────
+
+const formatTokens = (n) => (n >= 1000 ? (n / 1000).toFixed(0) + "k" : String(n));
+
+// "ctx 74k/200k (37%)": green below half full, amber below 80%, red from there.
+// Empty until Claude Code reports the window.
+function contextLabel(ctx) {
+  if (!ctx || typeof ctx !== "object") return "";
+  const { used_percentage: used, context_window_size: size } = ctx;
+  if (used === null || used === undefined || !size) return "";
+
+  const pct = Math.round(used);
+  const tokens = Math.round((pct / 100) * size);
+  const color = pct < 50 ? [80, 200, 120] : pct < 80 ? [240, 190, 50] : [240, 80, 80];
+  return `${DIM}ctx${RESET} ${fg(color)}${BOLD}${formatTokens(tokens)}/${formatTokens(size)} (${pct}%)${RESET}`;
+}
+
+// ── Rendering ────────────────────────────────────────────────
+
+// White bold text on each segment's colour. The separator after a segment is
+// drawn in its colour over the next segment's, or over the terminal's own
+// background after the last one.
+function renderSegments(segments) {
+  return segments
+    .map(({ text, color }, i) => {
+      const next = segments[i + 1];
+      const edge = next ? bg(next.color) + fg(color) : fg(color);
+      return `${bg(color)}${fg(WHITE)}${BOLD} ${text} ${RESET}${edge}${SEPARATOR}${RESET}`;
+    })
+    .join("");
+}
+
+// The whole line for one refresh, from the session JSON Claude Code pipes in
+// and the active profile directory.
+function render(session, configDir, { home = HOME, configPath = CONFIG_PATH } = {}) {
+  const data = session && typeof session === "object" ? session : {};
+  const cwd = (data.workspace && data.workspace.current_dir) || "";
+  const model = data.model && data.model.display_name;
+  const branch = gitBranch(cwd || process.cwd());
+  const dir = shortenDir(cwd, home);
+
+  const segments = [{ text: resolveAccountName(configDir, { home, configPath }), color: COLORS.account }];
+  if (model) segments.push({ text: model, color: COLORS.model });
+  if (branch) segments.push({ text: BRANCH_MARK + branch, color: COLORS.git });
+  if (dir) segments.push({ text: dir, color: COLORS.dir });
+
+  const context = contextLabel(data.context_window);
+  return renderSegments(segments) + (context ? "  " + context : "");
 }
 
 // ── Entry point ──────────────────────────────────────────────
@@ -128,38 +176,27 @@ function main() {
   // Claude Code pipes a JSON blob in. Reading fd 0 when it is a terminal blocks
   // forever, which used to make running this by hand to debug it look like a
   // hang, so only read when something is actually piped.
-  let input = "";
+  let session = {};
   if (!process.stdin.isTTY) {
     try {
-      input = readFileSync(0, "utf8");
-    } catch {}
+      const raw = readFileSync(0, "utf8");
+      if (raw.trim()) session = JSON.parse(raw);
+    } catch (err) {
+      debug(`ignoring unreadable input: ${err.message}`);
+    }
   }
 
-  const configDir = process.env.CLAUDE_CONFIG_DIR;
-  const name = resolveAccountName(configDir);
-  const label = buildBadge(name, configDir);
-
-  invalidateCacheOnAccountChange(accountIdFor(configDir));
-
-  let powerline = "";
-  try {
-    powerline = runPowerline(input, existsSync(POWERLINE_CONFIG) ? POWERLINE_CONFIG : null);
-  } catch (err) {
-    // Degrade to the badge alone: claude-powerline is optional, and a broken
-    // statusline should never take the session with it. Set
-    // CCC_STATUSLINE_DEBUG=1 to find out why it produced nothing.
-    debug(`claude-powerline failed: ${err.message}`);
-  }
-
-  process.stdout.write(`${label} ${powerline}\n`);
+  process.stdout.write(render(session, process.env.CLAUDE_CONFIG_DIR) + "\n");
 }
 
 module.exports = {
-  accountIdFor,
+  COLORS,
   resolveAccountName,
-  buildBadge,
-  runPowerline,
-  invalidateCacheOnAccountChange,
+  gitBranch,
+  shortenDir,
+  contextLabel,
+  renderSegments,
+  render,
   main,
 };
 

@@ -2,7 +2,7 @@
   "name": "claude-multi-account",
   "version": "0.1.0",
   "private": true,
-  "description": "Multi-account switching and a powerline statusline for Claude Code",
+  "description": "Multi-account switching and an account-aware statusline for Claude Code",
   "license": "MIT",
   "repository": {
     "type": "git",

@@ -31,11 +31,10 @@ const SYSTEM_PATH = IS_WINDOWS
  * @param {string} [opts.homeName]   directory name for HOME — pass something
  *                                   with a space or an apostrophe to exercise
  *                                   quoting.
- * @param {boolean} [opts.powerline] put a stub claude-powerline on PATH.
  * @param {boolean} [opts.node]      put node on PATH (off means "node missing").
  */
 export function makeSandbox(opts = {}) {
-  const { homeName = "home", powerline = true, node = true } = opts;
+  const { homeName = "home", node = true } = opts;
 
   const root = mkdtempSync(join(tmpdir(), "cma-"));
   const home = join(root, homeName);
@@ -46,7 +45,6 @@ export function makeSandbox(opts = {}) {
   writeFileSync(calls, "");
 
   writeStub(stubs, "claude", calls);
-  if (powerline) writeStub(stubs, "claude-powerline", calls, "POWERLINE-OK");
 
   const pathParts = [stubs, ...(node ? [NODE_DIR] : []), ...SYSTEM_PATH];
   // Git Bash needs its own bin directories on PATH to run install.sh at all.
@@ -58,10 +56,10 @@ export function makeSandbox(opts = {}) {
     USERPROFILE: home,
     PATH: pathParts.join(delimiter),
     CCC_TEST_CALLS: calls,
-    // Test files run in parallel, so spawning the stub can take longer than
-    // the production default. Without this the statusline tests are flaky
-    // under load rather than wrong.
-    CCC_POWERLINE_TIMEOUT_MS: "60000",
+    // Test files run in parallel, so spawning git from the statusline can take
+    // longer than the production default. Without this the statusline tests
+    // are flaky under load rather than wrong.
+    CCC_GIT_TIMEOUT_MS: "60000",
   };
   // A developer running the suite inside Claude Code has this set; leaking it
   // into a child would silently rewrite what every test observes.
@@ -133,16 +131,15 @@ export function makeSandbox(opts = {}) {
   };
 }
 
-function writeStub(dir, name, logPath, extraOutput) {
+function writeStub(dir, name, logPath) {
   if (IS_WINDOWS) {
     const lines = [
       "@echo off",
-      // Drain stdin first: the real claude-powerline reads the JSON Claude Code
-      // pipes in, and a stub that exits without reading it makes the parent's
-      // write fail with EPIPE.
+      // Drain stdin first, as the real program would: a stub that exits
+      // without reading what it was piped makes the parent's write fail with
+      // EPIPE.
       "more > nul 2>&1",
       `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
-      ...(extraOutput ? [`echo ${extraOutput}`] : []),
       "exit /b 0",
     ];
     writeFileSync(join(dir, `${name}.cmd`), lines.join("\r\n") + "\r\n");
@@ -151,12 +148,10 @@ function writeStub(dir, name, logPath, extraOutput) {
 
   const script = [
     "#!/bin/sh",
-    // Drain stdin first: the real claude-powerline reads the JSON Claude Code
-    // pipes in, and a stub that exits without reading it makes the parent's
-    // write fail with EPIPE.
+    // Drain stdin first, as the real program would: a stub that exits without
+    // reading what it was piped makes the parent's write fail with EPIPE.
     "cat > /dev/null 2>&1",
     `printf '%s cfg=[%s] args=[%s]\\n' "${name}" "\${CLAUDE_CONFIG_DIR-<unset>}" "$*" >> "${logPath}"`,
-    ...(extraOutput ? [`echo "${extraOutput}"`] : []),
     "exit 0",
   ].join("\n");
   const file = join(dir, name);

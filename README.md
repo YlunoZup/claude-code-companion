@@ -1,28 +1,24 @@
 # claude-multi-account
 
-Multi-account switching and a rich powerline statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command and see live session stats at a glance.
+Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, and always see which one you are in.
 
 ## Statusline
 
-The statusline appears at the bottom of every Claude Code session, showing the active account and live metrics powered by [claude-powerline](https://www.npmjs.com/package/claude-powerline):
+The statusline appears at the bottom of every Claude Code session and shows which account you are in, next to what the session is doing:
 
 ```
- 👤 Account 1  claude-multi-account  main ≡  opus-4  $0.23 │ 5.2k tk  ▓▓▓▓░░ 38%  $1.05  ◐ 42%  3m12s │ 8 msgs
+ Account 1 (Personal)  Opus 4.1   main  ~/code/claude-multi-account   ctx 74k/200k (37%)
 ```
 
 | Segment | What it shows |
 |---------|---------------|
-| **Account badge** | Active account name with colored background (purple = Account 1, orange = Account 2+) |
-| **Directory** | Current working directory (basename) |
-| **Git** | Branch, working tree status, ongoing operations |
-| **Model** | Active Claude model |
-| **Session** | Session cost and token count |
-| **Block** | Rate-limit block budget usage (weighted cost) |
-| **Today** | Total spend across all sessions today |
-| **Context** | Context window usage percentage |
-| **Metrics** | Session duration and message count |
+| **Account** | The active account's name from `config.json`, or the signed-in identity for a profile that has no entry |
+| **Model** | The model the session is using |
+| **Git** | The current branch; hidden outside a repository and on a detached HEAD |
+| **Directory** | The working directory: `~` for home, and only the last two components of anything deeper |
+| **Context** | Context window usage: green below 50%, amber below 80%, red from there |
 
-The account badge color tells you which account is active at a glance — no need to check config or environment variables.
+Each segment is white text on its own colour block, so the account is readable at a glance — no need to check config or environment variables. The statusline is a single Node script with no dependencies, so there is nothing else to install.
 
 ## Account Picker
 
@@ -80,11 +76,7 @@ The account email and plan shown in the picker come from each profile's `.claude
 
 - [Node.js](https://nodejs.org) (v18+)
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and in your PATH
-- [claude-powerline](https://www.npmjs.com/package/claude-powerline) for statusline segments:
-
-  ```bash
-  npm install -g claude-powerline
-  ```
+- [git](https://git-scm.com), optionally, for the branch segment
 
 ## Install
 
@@ -164,40 +156,12 @@ Edit `~/.claude-profiles/config.json` to customize account names:
 }
 ```
 
-- `name` — Display name shown in the picker and statusline badge
+- `name` — Display name shown in the picker and the statusline
 - `configDir` — Subdirectory under `~/.claude-profiles/` (`null` = default `~/.claude`)
 
-### Statusline config
+### Statusline appearance
 
-Edit `~/.claude-profiles/claude-powerline.json` to customize which segments appear and their behavior. The config uses the `display.lines[].segments` format:
-
-```json
-{
-  "display": {
-    "lines": [
-      {
-        "segments": {
-          "directory": { "enabled": true, "style": "basename" },
-          "git": { "enabled": true },
-          "model": { "enabled": true },
-          "session": { "enabled": true, "type": "both" },
-          "block": { "enabled": true },
-          "today": { "enabled": true },
-          "context": { "enabled": true },
-          "metrics": { "enabled": true, "showDuration": true, "showMessageCount": true }
-        }
-      }
-    ]
-  },
-  "budget": {
-    "session": { "amount": 10.0, "warningThreshold": 80 },
-    "block": { "amount": 15.0, "warningThreshold": 80 },
-    "today": { "amount": 50.0, "warningThreshold": 80 }
-  }
-}
-```
-
-> **Important:** The config must use `display.lines[].segments` (nested format), not top-level `segments`. The top-level format silently fails and segments won't appear.
+The segments sit flush against each other, which looks the same in any font. With a [Nerd Font](https://www.nerdfonts.com) or a Powerline-patched font you can have Powerline arrows between them instead: set `SEPARATOR` in `src/statusline.js` to `"\uE0B0"`, and `BRANCH_MARK` to `"\uE0A0 "` for a branch symbol, then re-run the installer.
 
 ### Adding more accounts
 
@@ -220,19 +184,15 @@ Then run `ccc N` to log in with the new account. The picker will show it immedia
 
 ## How the Statusline Works
 
-The statusline is a Node.js script (`statusline.js`) that Claude Code runs as an external command. On each refresh:
+The statusline is a Node.js script (`statusline.js`) that Claude Code runs as an external command, piping it a JSON description of the session. On each refresh it:
 
-1. **Account detection** — Reads `CLAUDE_CONFIG_DIR` to determine which account is active, then looks up the display name from `config.json`
-2. **Cache invalidation** — When the active account changes, the shared `today.json` cache is cleared so claude-powerline recalculates costs from the correct account's transcripts
-3. **Powerline rendering** — Pipes stdin through `claude-powerline --config` to render the configured segments (git, model, session cost, context usage, etc.)
-4. **Output** — Concatenates the colored account badge with the powerline output
+1. **Resolves the account** — reads `CLAUDE_CONFIG_DIR` to tell which profile is active, then looks its name up in `config.json`, falling back to the identity Claude Code recorded for that profile
+2. **Reads the session** — the model, working directory and context window usage come straight from the JSON Claude Code pipes in
+3. **Asks git for the branch** — `git rev-parse --abbrev-ref HEAD` in the working directory, given one second; set `CCC_GIT_TIMEOUT_MS` if a large repository or a network drive needs longer
+4. **Prints one line** of coloured segments
 
-If claude-powerline produces nothing you get the account badge on its own. Run
+If a segment is missing, run
 `CCC_STATUSLINE_DEBUG=1 node ~/.claude-profiles/statusline.js < /dev/null` to see why.
-claude-powerline is given 5 seconds to respond; set `CCC_POWERLINE_TIMEOUT_MS` if your
-machine or transcript history needs longer.
-
-The cache invalidation step is critical because all accounts share the same `~/.claude/powerline/usage/` directory. Without it, switching from Account 1 to Account 2 would show Account 1's cached daily cost.
 
 ## Shared Data
 
@@ -267,11 +227,9 @@ claude-multi-account/
 ├── src/
 │   ├── profiles.cjs            # Shared profile/config logic (also a small CLI)
 │   ├── picker.mjs              # Interactive account picker UI
-│   └── statusline.js           # Statusline script (account badge + powerline)
+│   └── statusline.js           # Statusline (account, model, branch, directory, context)
 ├── test/                       # Test suite (node --test, no dependencies)
 ├── .github/workflows/ci.yml    # Cross-platform CI
-├── config/
-│   └── claude-powerline.json   # Default powerline segment configuration
 └── config.example.json         # Example account configuration
 ```
 

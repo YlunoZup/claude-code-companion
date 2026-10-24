@@ -50,6 +50,18 @@ describe("line endings", () => {
   });
 });
 
+describe("no invisible glyphs in the sources", () => {
+  // A Powerline or Nerd Font glyph pasted in literally is a private-use
+  // character: invisible in most editors, and easily stripped by a tool without
+  // anybody noticing. Write it as a \uXXXX escape instead.
+  for (const file of [...SHELL_FILES, ...BATCH_FILES, ...SOURCE_FILES]) {
+    test(`${file} has no private-use characters`, () => {
+      const found = [...read(file)].filter((c) => c >= "\uE000" && c <= "\uF8FF");
+      assert.deepEqual(found.map((c) => `U+${c.codePointAt(0).toString(16).toUpperCase()}`), []);
+    });
+  }
+});
+
 describe("shell syntax", () => {
   for (const file of SHELL_FILES) {
     test(`${file} parses`, () => {
@@ -84,7 +96,6 @@ describe("the installers ship what they reference", () => {
     join("src", "profiles.cjs"),
     join("src", "picker.mjs"),
     join("src", "statusline.js"),
-    join("config", "claude-powerline.json"),
     "config.example.json",
     join("bin", "ccc"),
     join("bin", "ccc.bat"),
@@ -99,7 +110,7 @@ describe("the installers ship what they reference", () => {
   test("install.sh and install.bat copy the same set of files", () => {
     const sh = read("install.sh");
     const bat = read("install.bat");
-    for (const name of ["profiles.cjs", "picker.mjs", "statusline.js", "claude-powerline.json"]) {
+    for (const name of ["profiles.cjs", "picker.mjs", "statusline.js", "config.example.json"]) {
       assert.ok(sh.includes(name), `install.sh never mentions ${name}`);
       assert.ok(bat.includes(name), `install.bat never mentions ${name}`);
     }
@@ -123,7 +134,6 @@ describe("no credentials in the tree", () => {
     ...SOURCE_FILES,
     "README.md",
     "config.example.json",
-    join("config", "claude-powerline.json"),
     "package.json",
   ];
 

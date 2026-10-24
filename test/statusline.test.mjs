@@ -1,60 +1,58 @@
 // Tests for the statusline script.
 //
-// claude-powerline is stubbed throughout — these cover the account resolution,
-// the badge, and the argument handoff, not claude-powerline's own rendering.
+// Every run gets a throwaway HOME, so nothing here reads the real config.json,
+// ~/.claude.json, or a repository that happens to surround the test run.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeSandbox, REPO_ROOT, IS_WINDOWS } from "./helpers.test.mjs";
+import { makeSandbox, stripAnsi, REPO_ROOT } from "./helpers.test.mjs";
 
 const require = createRequire(import.meta.url);
 const statusline = require(join(REPO_ROOT, "src", "statusline.js"));
 
+const noGit = spawnSync("git", ["--version"]).status === 0 ? false : "git is not installed";
+
+// Generous, because test files run in parallel and a loaded machine can be slow
+// to spawn git. The production default is a second.
+const GIT_TIMEOUT = 60000;
+
 /**
- * Run the statusline as Claude Code does: JSON on stdin.
+ * Run the statusline as Claude Code does: the session JSON on stdin.
  * Debug is on so a failed assertion reports why, not just that.
  */
-function runStatusline(sb, configDir) {
+function runStatusline(sb, session, configDir) {
   const env = { CCC_STATUSLINE_DEBUG: "1" };
   if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
-  return sb.node("src/statusline.js", [], env, "{}\n");
+  const input = typeof session === "string" ? session : JSON.stringify(session);
+  return sb.node("src/statusline.js", [], env, input);
 }
 
-/** The claude-powerline invocation the stub recorded. */
-function powerlineCall(sb) {
-  const line = sb.calls().find((l) => l.startsWith("claude-powerline "));
-  assert.ok(line, "claude-powerline was never invoked");
-  return /args=\[(.*)\]$/.exec(line)[1];
+/** A repository with one commit, so HEAD resolves, on the given branch. */
+function makeRepo(dir, branch) {
+  mkdirSync(dir, { recursive: true });
+  const git = (...args) => {
+    const r = spawnSync(
+      "git",
+      ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", ...args],
+      { cwd: dir, encoding: "utf8" }
+    );
+    assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
+  };
+  git("init", "-q");
+  git("commit", "-q", "--allow-empty", "-m", "init");
+  git("checkout", "-q", "-b", branch);
+  return git;
 }
 
-describe("accountIdFor", () => {
-  test("no CLAUDE_CONFIG_DIR is the default profile", () => {
-    assert.equal(statusline.accountIdFor(undefined), "__default__");
-    assert.equal(statusline.accountIdFor(""), "__default__");
-  });
-
-  test("a profile directory reduces to its basename", () => {
-    assert.equal(statusline.accountIdFor(join("/a", "b", "account3")), "account3");
-  });
-
-  test("a trailing separator does not change the answer", () => {
-    assert.equal(statusline.accountIdFor(join("/a", "b", "account3") + "/"), "account3");
-  });
-});
-
-describe("buildBadge", () => {
-  test("the default profile and a named profile get different colours", () => {
-    const def = statusline.buildBadge("One", undefined);
-    const other = statusline.buildBadge("Two", "/p/account2");
-    assert.match(def, /99;66;245/);
-    assert.match(other, /230;126;34/);
-  });
-
-  test("the account name appears in the badge", () => {
-    assert.match(statusline.buildBadge("Client Work", "/p/account4"), /Client Work/);
-  });
+const session = (cwd, extra = {}) => ({
+  model: { display_name: "Opus 4.1" },
+  workspace: { current_dir: cwd },
+  context_window: { used_percentage: 37.4, context_window_size: 200000 },
+  ...extra,
 });
 
 describe("resolveAccountName", () => {
@@ -129,7 +127,6 @@ describe("resolveAccountName", () => {
     const sb = makeSandbox();
     try {
       sb.writeJson(sb.configPath, {});
-      const { writeFileSync } = require("node:fs");
       writeFileSync(sb.configPath, "{ broken");
 
       const name = statusline.resolveAccountName(undefined, {
@@ -144,127 +141,192 @@ describe("resolveAccountName", () => {
   });
 });
 
-describe("end to end", () => {
-  test("renders the badge for the default profile", () => {
+describe("shortenDir", () => {
+  const HOME = "/Users/me";
+
+  test("home itself is ~", () => {
+    assert.equal(statusline.shortenDir(HOME, HOME), "~");
+  });
+
+  test("up to two levels below home are shown in full", () => {
+    assert.equal(statusline.shortenDir(`${HOME}/code`, HOME), "~/code");
+    assert.equal(statusline.shortenDir(`${HOME}/code/api`, HOME), "~/code/api");
+  });
+
+  test("anything deeper keeps its last two components", () => {
+    assert.equal(statusline.shortenDir(`${HOME}/work/clients/acme/api`, HOME), "~/acme/api");
+  });
+
+  test("a path outside home is never shown under ~", () => {
+    assert.equal(statusline.shortenDir("/opt/tools/x/y", HOME), "…/x/y");
+    assert.equal(statusline.shortenDir("/opt/tools", HOME), "/opt/tools");
+  });
+
+  test("a sibling that merely shares the home prefix is not inside home", () => {
+    assert.equal(statusline.shortenDir("/Users/me2", HOME), "/Users/me2");
+    assert.equal(statusline.shortenDir("/Users/me2/a/b/c", HOME), "…/b/c");
+  });
+
+  test("Windows separators are understood", () => {
+    const home = "C:\\Users\\me";
+    assert.equal(statusline.shortenDir(`${home}\\code`, home), "~/code");
+    assert.equal(statusline.shortenDir(`${home}\\work\\clients\\acme\\api`, home), "~/acme/api");
+  });
+
+  test("no directory, no segment", () => {
+    assert.equal(statusline.shortenDir("", HOME), "");
+    assert.equal(statusline.shortenDir(undefined, HOME), "");
+  });
+});
+
+describe("contextLabel", () => {
+  const label = (used, size = 200000) =>
+    statusline.contextLabel({ used_percentage: used, context_window_size: size });
+
+  test("shows the tokens used, the window size and the percentage", () => {
+    assert.equal(stripAnsi(label(37.4)), "ctx 74k/200k (37%)");
+    assert.equal(stripAnsi(label(100, 1000000)), "ctx 1000k/1000k (100%)");
+  });
+
+  test("small numbers are not abbreviated", () => {
+    assert.equal(stripAnsi(label(0, 800)), "ctx 0/800 (0%)");
+  });
+
+  test("green below half full, amber below 80%, red from there", () => {
+    const GREEN = /38;2;80;200;120m/;
+    const AMBER = /38;2;240;190;50m/;
+    const RED = /38;2;240;80;80m/;
+    assert.match(label(49.4), GREEN);
+    assert.match(label(49.6), AMBER, "49.6 rounds to 50");
+    assert.match(label(79.4), AMBER);
+    assert.match(label(80), RED);
+  });
+
+  test("nothing until Claude Code reports the window", () => {
+    assert.equal(statusline.contextLabel(undefined), "");
+    assert.equal(statusline.contextLabel("nonsense"), "");
+    assert.equal(label(null), "");
+    assert.equal(label(50, 0), "");
+  });
+});
+
+describe("gitBranch", { skip: noGit }, () => {
+  test("names the branch that is checked out", () => {
     const sb = makeSandbox();
     try {
-      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-      const r = runStatusline(sb);
-
-      assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /Personal/);
-      assert.match(r.stdout, /99;66;245/);
-      assert.match(r.stdout, /POWERLINE-OK/, `stderr: ${r.stderr}`);
+      const repo = join(sb.root, "repo");
+      makeRepo(repo, "feature/x");
+      assert.equal(statusline.gitBranch(repo, GIT_TIMEOUT), "feature/x");
     } finally {
       sb.cleanup();
     }
   });
 
-  test("renders the badge for a named profile", () => {
+  test("a detached HEAD has no branch to show", () => {
     const sb = makeSandbox();
     try {
-      sb.writeJson(sb.configPath, {
-        accounts: { 1: { name: "Personal", configDir: null }, 2: { name: "Work", configDir: "account2" } },
-      });
-      const r = runStatusline(sb, join(sb.profilesDir, "account2"));
-
-      assert.match(r.stdout, /Work/);
-      assert.match(r.stdout, /230;126;34/);
+      const repo = join(sb.root, "repo");
+      makeRepo(repo, "feature/x")("checkout", "-q", "--detach");
+      assert.equal(statusline.gitBranch(repo, GIT_TIMEOUT), "");
     } finally {
       sb.cleanup();
     }
   });
 
-  test("degrades to the badge alone when claude-powerline is not installed", () => {
-    const sb = makeSandbox({ powerline: false });
-    try {
-      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-      const r = runStatusline(sb);
-
-      assert.equal(r.status, 0, "a missing optional dependency must not break the statusline");
-      assert.match(r.stdout, /Personal/);
-    } finally {
-      sb.cleanup();
-    }
-  });
-
-  test("stays quiet about failures unless debug is asked for", () => {
-    const sb = makeSandbox({ powerline: false });
-    try {
-      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-      const r = sb.node("src/statusline.js", [], {}, "{}\n");
-      assert.equal(r.stderr, "", "a missing claude-powerline must not print anything");
-    } finally {
-      sb.cleanup();
-    }
-  });
-
-  test("says why it produced nothing when asked to", () => {
-    const sb = makeSandbox({ powerline: false });
-    try {
-      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-      const r = sb.node("src/statusline.js", [], { CCC_STATUSLINE_DEBUG: "1" }, "{}\n");
-      assert.match(r.stderr, /claude-powerline failed/);
-    } finally {
-      sb.cleanup();
-    }
-  });
-
-  test("switching accounts clears the shared today cache", () => {
+  test("outside a repository there is none", () => {
     const sb = makeSandbox();
     try {
-      sb.writeJson(sb.configPath, {
-        accounts: { 1: { name: "One", configDir: null }, 2: { name: "Two", configDir: "account2" } },
-      });
-      const cache = join(sb.claudeDir, "powerline", "usage", "today.json");
-
-      runStatusline(sb);
-      sb.writeJson(cache, { total: 42 });
-
-      runStatusline(sb, join(sb.profilesDir, "account2"));
-
-      const { existsSync } = require("node:fs");
-      assert.equal(existsSync(cache), false, "the previous account's cached cost must be dropped");
+      assert.equal(statusline.gitBranch(sb.home, GIT_TIMEOUT), "");
+      assert.equal(statusline.gitBranch(join(sb.root, "does-not-exist"), GIT_TIMEOUT), "");
     } finally {
       sb.cleanup();
     }
   });
 });
 
-describe("the config path reaches claude-powerline intact", () => {
-  // The path used to be interpolated into a shell command string, so a $, a
-  // backtick or a quote anywhere in the home directory changed what ran.
-  const names = IS_WINDOWS
-    ? ["home with spaces"]
-    : ["home with spaces", "home$WITH$dollars", "home`with`ticks", "it's home"];
+describe("end to end", () => {
+  // Pinned byte for byte, so a refactor cannot quietly change what every
+  // session shows.
+  test("the line is exactly the one it has always been", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, {
+        accounts: { 1: { name: "Personal", configDir: null }, 2: { name: "Work", configDir: "account2" } },
+      });
+      const cwd = join(sb.home, "code", "acme", "api");
+      mkdirSync(cwd, { recursive: true });
 
-  for (const homeName of names) {
-    test(`survives a home named ${JSON.stringify(homeName)}`, () => {
-      const sb = makeSandbox({ homeName });
-      try {
-        sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-        sb.writeJson(join(sb.profilesDir, "claude-powerline.json"), { theme: "dark" });
+      const r = runStatusline(sb, session(cwd), join(sb.profilesDir, "account2"));
 
-        const r = runStatusline(sb);
-        assert.equal(r.status, 0, r.stderr);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(
+        r.stdout,
+        "\x1b[48;2;99;66;245m\x1b[38;2;255;255;255m\x1b[1m Work \x1b[0m" +
+          "\x1b[48;2;30;130;180m\x1b[38;2;99;66;245m\x1b[0m" +
+          "\x1b[48;2;30;130;180m\x1b[38;2;255;255;255m\x1b[1m Opus 4.1 \x1b[0m" +
+          "\x1b[48;2;60;60;70m\x1b[38;2;30;130;180m\x1b[0m" +
+          "\x1b[48;2;60;60;70m\x1b[38;2;255;255;255m\x1b[1m ~/acme/api \x1b[0m" +
+          "\x1b[38;2;60;60;70m\x1b[0m" +
+          "  \x1b[2mctx\x1b[0m \x1b[38;2;80;200;120m\x1b[1m74k/200k (37%)\x1b[0m\n"
+      );
+    } finally {
+      sb.cleanup();
+    }
+  });
 
-        const args = powerlineCall(sb);
-        assert.ok(
-          args.includes(join(sb.profilesDir, "claude-powerline.json")),
-          `--config path was mangled: ${args}`
-        );
-      } finally {
-        sb.cleanup();
-      }
-    });
-  }
-
-  test("no --config is passed when there is no powerline config file", () => {
+  test("the default profile shows its name from config.json", () => {
     const sb = makeSandbox();
     try {
       sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
-      runStatusline(sb);
-      assert.equal(powerlineCall(sb), "--style=powerline");
+      const r = runStatusline(sb, session(sb.home));
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(stripAnsi(r.stdout), " Personal  Opus 4.1  ~   ctx 74k/200k (37%)\n");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("shows the branch when the session is inside a repository", { skip: noGit }, () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
+      const repo = join(sb.home, "code", "repo");
+      makeRepo(repo, "feature/x");
+
+      const r = runStatusline(sb, session(repo));
+
+      assert.equal(stripAnsi(r.stdout), " Personal  Opus 4.1   feature/x  ~/code/repo   ctx 74k/200k (37%)\n");
+      assert.match(r.stdout, /48;2;40;167;70m/, "the branch segment should be green");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("still names the account with nothing on stdin, or something that is not JSON", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
+      for (const input of ["", "{nope", "null"]) {
+        const r = runStatusline(sb, input);
+        assert.equal(r.status, 0, `${JSON.stringify(input)}: ${r.stderr}`);
+        assert.match(stripAnsi(r.stdout), /^ Personal /, JSON.stringify(input));
+      }
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("stays quiet on stderr unless debug is asked for", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Personal", configDir: null } } });
+
+      const quiet = sb.node("src/statusline.js", [], {}, "{nope");
+      assert.equal(quiet.stderr, "", "bad input must not print anything");
+
+      const loud = sb.node("src/statusline.js", [], { CCC_STATUSLINE_DEBUG: "1" }, "{nope");
+      assert.match(loud.stderr, /ignoring unreadable input/);
     } finally {
       sb.cleanup();
     }

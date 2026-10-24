@@ -103,23 +103,6 @@ if errorlevel 1 (
 )
 echo   [ OK] Installed statusline.js
 
-if not exist "%PROFILES_DIR%\claude-powerline.json" (
-    copy /Y "%SCRIPT_DIR%config\claude-powerline.json" "%PROFILES_DIR%\claude-powerline.json" >nul
-    echo   [ OK] Installed claude-powerline.json
-) else (
-    echo   [ OK] claude-powerline.json already exists, skipping
-)
-
-:: Check for claude-powerline
-where claude-powerline >nul 2>nul
-if errorlevel 1 (
-    echo   [WARN] claude-powerline not found. Install it for statusline segments:
-    echo     npm install -g claude-powerline
-    echo.
-) else (
-    echo   [ OK] claude-powerline found
-)
-
 :: ── Configure statusline in settings.json ──────────────────────
 :: profiles.cjs creates the file when it is absent and merges the statusLine key
 :: when it is not, preserving every other setting. The old code checked for the
@@ -206,8 +189,8 @@ echo     ccc 2        Launch with Account 2
 echo     ccc 2 -c     Launch Account 2 in continue mode
 echo.
 echo   Statusline:
-echo     Configured automatically. Your Claude Code sessions
-echo     will show the account badge and powerline segments.
+echo     Configured automatically. Your Claude Code sessions will show
+echo     the account, model, git branch, directory and context usage.
 echo.
 echo   First-time setup for Account 2:
 echo     Run "ccc 2" and log in when prompted.
