@@ -1,6 +1,6 @@
 # claude-multi-account
 
-Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, and always see which one you are in.
+Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, see which Claude account each one is signed into, and how much of its 5-hour and weekly limits is left — live.
 
 ## Statusline
 
@@ -22,26 +22,43 @@ Each segment is white text on its own colour block, so the account is readable a
 
 ## Account Picker
 
-Run `ccc` to get the interactive picker:
+Run `ccc` to get the interactive picker. Every account shows who it is signed in as, its plan, and how much of its 5-hour and weekly limits is left right now:
 
 ```
-  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-  ┃                                                  ┃
-  ┃   ◆  Claude Code                                ┃
-  ┃      Account Switcher                            ┃
-  ┃                                                  ┃
-  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
-  ┃                                                  ┃
-  ┃   [1]  ●  Account 1                             ┃
-  ┃            Claude Max 20X                        ┃
-  ┃                                                  ┃
-  ┃   [2]  ●  Account 2                             ┃
-  ┃            Claude Pro                            ┃
-  ┃                                                  ┃
-  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
 
-  Select account [1/2]:
+  ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+  ┃                                                          ┃
+  ┃   ◆  Claude Code                                         ┃
+  ┃      Account Switcher                                    ┃
+  ┃                                                          ┃
+  ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
+  ┃                                                          ┃
+  ┃   [1]  ●  Personal                                       ┃
+  ┃         me@example.com  ·  Claude Pro                    ┃
+  ┃         5h    █████░░░░░  45% left · resets in 3h 48m    ┃
+  ┃         week  █████████░  86% left · resets in 4d 22h    ┃
+  ┃                                                          ┃
+  ┃   [2]  ●  Work                                           ┃
+  ┃         work@example.com  ·  Claude Max 20x              ┃
+  ┃         5h    ██████████ 100% left                       ┃
+  ┃         week  ░░░░░░░░░░   0% left · resets in 2d 21h    ┃
+  ┃                                                          ┃
+  ┃   [3]  ●  Client  same login as [1]                      ┃
+  ┃         me@example.com  ·  Claude Pro                    ┃
+  ┃         5h    █████░░░░░  45% left · resets in 3h 48m    ┃
+  ┃         week  █████████░  86% left · resets in 4d 22h    ┃
+  ┃                                                          ┃
+  ┃   [4]  ○  Spare                                          ┃
+  ┃         not logged in  ·  ccc login 4                    ┃
+  ┃                                                          ┃
+  ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+  Select account [1/2/3/4, r to refresh, q to quit]:
 ```
+
+- **Usage** is the share of each limit still *left*: green at half or more, amber under half, red under a fifth. The 5-hour window has no reset time until something starts it.
+- **same login as [n]** means two slots are signed into one Claude account, so they share its limits. `ccc login <slot>` puts a different Claude account in the slot.
+- Press a number to launch that account, **r** to fetch the usage again, **q** to quit. `ccc list` prints the same overview without the prompt.
 
 ## How It Works
 
@@ -66,11 +83,19 @@ On **macOS**, Claude Code stores OAuth credentials in the login Keychain rather 
 
 For example, `sha256("/Users/you/.claude-profiles/account2")[0:8]` is `04f595a6`, giving `Claude Code-credentials-04f595a6`.
 
-The picker detects a logged-in account with `security find-generic-password -s "<service>"` and deliberately **no** `-w` flag. An attribute-only lookup confirms the entry exists without reading the secret, so macOS never shows a Keychain permission prompt and the check costs about 10 ms.
+`ccc` detects a logged-in account with `security find-generic-password -s "<service>"` and deliberately **no** `-w` flag. An attribute-only lookup confirms the entry exists without reading the secret, so macOS never shows a Keychain permission prompt and the check costs about 10 ms.
 
 On **Linux and Windows**, and on older Claude Code builds, credentials are still a `.credentials.json` file inside the config directory. The picker checks that path too, so both storage models work.
 
 The account email and plan shown in the picker come from each profile's `.claude.json` under the `oauthAccount` key, which is plain JSON and needs no Keychain access. Note that the default profile's copy lives at `~/.claude.json` in your home directory, while every other profile keeps its own inside the config directory.
+
+### Live usage
+
+The usage figures come from Claude Code itself — the numbers its `/usage` screen shows. For each signed-in account, `ccc` starts `claude -p` in that account's profile and sends it a single `get_usage` control request: no prompt, so no model call and no usage of its own; hooks off, no MCP servers, nothing saved. Every account is asked at once, which takes a second or two.
+
+`ccc` never reads your login token. Claude Code reads the credentials and, when the token has expired, refreshes it under its own locks. A refresh from outside could race a Claude Code session running on the same account and sign it out. It is also why an account you have not used for a day still shows live numbers.
+
+Set `CCC_NO_USAGE=1` to leave usage out and open the picker instantly.
 
 ## Prerequisites
 
@@ -122,26 +147,38 @@ ccc 1        # Account 1 (default ~/.claude)
 ccc 2        # Account 2
 ccc 3        # Account 3 (if configured)
 
-# Add a new account
-ccc add              # prompts for a name
-ccc add My Work      # creates with name "My Work"
-
 # Pass any Claude Code flags after the account number
 ccc 2 --dangerously-skip-permissions
 ccc 1 -c    # continue mode
 ccc 3 -r "fix the bug in auth.ts"
+
+# Every account, who it is signed in as, and its live usage
+ccc list
+
+# Manage accounts
+ccc add My Work            # add an account (prompts for a name if you leave it out)
+ccc login 3                # sign slot 3 in again, or into a different Claude account
+ccc logout 3               # sign slot 3 out
+ccc rename 3 Client Work    # rename slot 3
+ccc remove 3               # take slot 3 off the list (its folder is kept)
+ccc repair                 # check every account and fix what can be fixed
+ccc help                   # all of the above
 ```
+
+`ccc login` and `ccc logout` run Claude Code's own `claude auth login` and `claude auth logout` in that account's profile; anything after the number goes along, so `ccc login 3 --email you@example.com` pre-fills the sign-in page. `relogin` is another name for `login`.
+
+`ccc repair`, or `ccc repair 3` for one account, recreates a missing profile folder, relinks the shared session history and puts back a missing statusline. What only you can do — signing an account in, or giving a slot that duplicates another its own Claude account — it lists with the command that does it, and it exits non-zero while anything is left. It never rewrites a `settings.json` it cannot parse, or replaces a real `projects` folder.
 
 ## First-Time Setup for New Accounts
 
-After installing, log in with each additional account:
+After installing, sign each additional account in:
 
 ```bash
-ccc 2    # logs into Account 2
-ccc 3    # logs into Account 3 (if configured)
+ccc login 2    # signs Account 2 in
+ccc login 3    # signs Account 3 in (if configured)
 ```
 
-Claude Code will detect there are no credentials and prompt you to authenticate. Log in with that account. After that, the picker will show the account as configured.
+This runs Claude Code's own sign-in in that account's profile, which opens the browser. `ccc 2` works too: Claude Code asks you to sign in the first time it starts there. After that, the picker shows who the account is signed in as, and its usage.
 
 ## Configuration
 
@@ -180,7 +217,7 @@ This automatically:
 - Updates `config.json`
 - Sets up `settings.json` with the statusline
 
-Then run `ccc N` to log in with the new account. The picker will show it immediately.
+Then run `ccc login N` to sign the new account in. The picker will show it immediately.
 
 `ccc add` is not the only way in: logging into a new slot with `ccc N` works too. `ccc` checks each profile's `settings.json` on every launch and adds the statusline when it is missing, so a profile created that way still gets one. A `statusLine` that runs something else is left alone.
 
@@ -229,6 +266,7 @@ claude-multi-account/
 ├── src/
 │   ├── profiles.cjs            # Shared profile/config logic (also a small CLI)
 │   ├── picker.mjs              # Interactive account picker UI
+│   ├── usage.cjs               # Live usage, asked of Claude Code
 │   └── statusline.js           # Statusline (account, model, branch, directory, context)
 ├── test/                       # Test suite (node --test, no dependencies)
 ├── .github/workflows/ci.yml    # Cross-platform CI
@@ -263,7 +301,7 @@ It runs the real `install.sh`, `bin/ccc`, `install.bat` and `bin/ccc.bat` agains
 throwaway `HOME` with a stub `claude` on `PATH` that records `CLAUDE_CONFIG_DIR` and
 its arguments instead of launching anything. **No test touches the macOS Keychain, a
 real Claude account, or your actual `~/.claude`** — a profile with no credentials is
-exactly the state every test starts from.
+exactly the state every test starts from. The stub `claude` answers usage requests with canned figures too, so no test ever starts the real Claude Code.
 
 The Windows CMD suite (`test/windows.test.mjs`) skips on other platforms.
 

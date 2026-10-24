@@ -5,12 +5,17 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { makeSandbox, IS_WINDOWS, REPO_ROOT } from "./helpers.test.mjs";
 
 const require = createRequire(import.meta.url);
 const profiles = require(join(REPO_ROOT, "src", "profiles.cjs"));
+
+// The functions below run in this process, not in a sandbox child, so keep them
+// away from the real Keychain the same way the sandbox does: the default
+// profile's service name does not depend on HOME.
+process.env.CCC_NO_KEYCHAIN = "1";
 
 describe("readConfig", () => {
   test("a missing file is the ordinary first-run state, not an error", () => {
@@ -398,6 +403,22 @@ describe("ensureStatusLine", () => {
     }
   });
 
+  // Writing the same path back would change nothing; the installer is what
+  // brings a missing statusline.js back.
+  test("a statusLine running statusline.js stays put even while that file is missing", () => {
+    const sb = makeSandbox();
+    try {
+      const file = setup(sb, { statusLine: { type: "command", command: profiles.statusLineCommand(sb.profilesDir) } });
+      rmSync(join(sb.profilesDir, "statusline.js"));
+      const before = readFileSync(file, "utf8");
+
+      assert.equal(profiles.ensureStatusLine(file, sb.profilesDir).status, "current");
+      assert.equal(readFileSync(file, "utf8"), before);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
   // What renaming or consolidating the statusline scripts leaves behind.
   test("repoints a statusLine whose .claude-profiles script is gone", () => {
     const sb = makeSandbox();
@@ -650,5 +671,251 @@ describe("accountNameFor", () => {
 
   test("returns null when nothing matches", () => {
     assert.equal(profiles.accountNameFor(config, "account9"), null);
+  });
+});
+
+describe("accountState", () => {
+  test("a profile with .credentials.json is signed in, as whoever .claude.json says", () => {
+    const sb = makeSandbox();
+    try {
+      sb.signIn("account2", { email: "work@example.com", accountUuid: "u-2", tier: "default_claude_max_20x" });
+      const state = profiles.accountState("account2", { home: sb.home });
+      assert.equal(state.signedIn, true);
+      assert.equal(state.email, "work@example.com");
+      assert.equal(state.accountUuid, "u-2");
+      assert.equal(state.tier, "default_claude_max_20x");
+      assert.equal(state.dir, join(sb.profilesDir, "account2"));
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  // Claude Code keeps the default profile's .claude.json in the home directory,
+  // not inside ~/.claude.
+  test("the default profile's identity comes from ~/.claude.json", () => {
+    const sb = makeSandbox();
+    try {
+      sb.signIn(null, { email: "me@example.com" });
+      const state = profiles.accountState(null, { home: sb.home });
+      assert.equal(state.isDefault, true);
+      assert.equal(state.email, "me@example.com");
+      assert.equal(state.dir, join(sb.home, ".claude"));
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("no credentials anywhere is signed out, even with an identity left over", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(join(sb.profilesDir, "account2", ".claude.json"), { oauthAccount: { emailAddress: "old@example.com" } });
+      assert.equal(profiles.accountState("account2", { home: sb.home }).signedIn, false);
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("renameAccount", () => {
+  test("changes only the name", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 2: { name: "Old", configDir: "account2" } } });
+      const r = profiles.renameAccount({ home: sb.home, key: 2, name: `Client "A" & B` });
+      assert.equal(r.status, "ok");
+      assert.deepEqual(sb.readJson(sb.configPath).accounts["2"], { name: `Client "A" & B`, configDir: "account2" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("an account that is not there is reported, and nothing is written", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 2: { name: "Two", configDir: "account2" } } });
+      const before = readFileSync(sb.configPath, "utf8");
+      assert.equal(profiles.renameAccount({ home: sb.home, key: 9, name: "X" }).status, "no-account");
+      assert.equal(readFileSync(sb.configPath, "utf8"), before);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("refuses to rewrite a config.json it could not parse", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(sb.profilesDir, { recursive: true });
+      writeFileSync(sb.configPath, '{"accounts":{"2":{}},}');
+      assert.equal(profiles.renameAccount({ home: sb.home, key: 2, name: "X" }).status, "invalid");
+      assert.equal(readFileSync(sb.configPath, "utf8"), '{"accounts":{"2":{}},}');
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("removeAccount", () => {
+  test("takes the slot off the list and leaves its folder alone", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, {
+        accounts: { 1: { name: "One", configDir: null }, 2: { name: "Two", configDir: "account2" } },
+      });
+      sb.writeJson(join(sb.profilesDir, "account2", "settings.json"), { theme: "dark" });
+
+      const r = profiles.removeAccount({ home: sb.home, key: 2 });
+
+      assert.equal(r.status, "ok");
+      assert.equal(r.dir, join(sb.profilesDir, "account2"));
+      assert.deepEqual(Object.keys(sb.readJson(sb.configPath).accounts), ["1"]);
+      assert.ok(existsSync(join(sb.profilesDir, "account2", "settings.json")), "its files must be kept");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("an account that is not there is reported", () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: {} });
+      assert.equal(profiles.removeAccount({ home: sb.home, key: 4 }).status, "no-account");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("repairAccount", () => {
+  const levels = (findings) => findings.map((f) => f.level);
+
+  test("creates the folder, links the history and adds the statusline", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(sb.claudeDir, { recursive: true });
+      const { findings } = profiles.repairAccount("4", { name: "Four", configDir: "account4" }, { home: sb.home });
+
+      const dir = join(sb.profilesDir, "account4");
+      assert.ok(existsSync(join(dir, "projects")), "projects should be linked");
+      assert.match(sb.readJson(join(dir, "settings.json")).statusLine.command, /statusline\.js/);
+      assert.deepEqual(levels(findings), ["fixed", "fixed", "fixed", "todo"]);
+      assert.match(findings[3].text, /not signed in — run: ccc login 4/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a signed-in account that is already set up is all ok, and nothing changes", () => {
+    const sb = makeSandbox();
+    try {
+      const entry = { name: "Two", configDir: "account2" };
+      profiles.repairAccount("2", entry, { home: sb.home });
+      sb.signIn("account2", { email: "two@example.com" });
+      const settings = readFileSync(join(sb.profilesDir, "account2", "settings.json"), "utf8");
+
+      const { findings } = profiles.repairAccount("2", entry, { home: sb.home });
+
+      assert.deepEqual(levels(findings), ["ok", "ok", "ok"]);
+      assert.match(findings[2].text, /signed in as two@example\.com/);
+      assert.equal(readFileSync(join(sb.profilesDir, "account2", "settings.json"), "utf8"), settings);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a slot signed into the same Claude account as an earlier one is pointed out", () => {
+    const sb = makeSandbox();
+    try {
+      sb.signIn("account2", { email: "me@example.com", accountUuid: "same" });
+      sb.signIn("account3", { email: "me@example.com", accountUuid: "same" });
+      const earlier = [{ ...profiles.accountState("account2", { home: sb.home }), key: "2" }];
+
+      const { findings } = profiles.repairAccount("3", { configDir: "account3" }, { home: sb.home, earlier });
+
+      const twin = findings.find((f) => /same Claude account/.test(f.text));
+      assert.ok(twin, "expected the duplicate to be reported");
+      assert.equal(twin.level, "todo");
+      assert.match(twin.text, /\[2\].*ccc login 3/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("never rewrites a settings.json it cannot parse, or a real projects folder", () => {
+    const sb = makeSandbox();
+    try {
+      const dir = join(sb.profilesDir, "account2");
+      mkdirSync(join(dir, "projects"), { recursive: true });
+      writeFileSync(join(dir, "projects", "keep.txt"), "history");
+      writeFileSync(join(dir, "settings.json"), '{ "theme": "dark", }');
+
+      const { findings } = profiles.repairAccount("2", { configDir: "account2" }, { home: sb.home });
+
+      assert.equal(readFileSync(join(dir, "settings.json"), "utf8"), '{ "theme": "dark", }');
+      assert.equal(readFileSync(join(dir, "projects", "keep.txt"), "utf8"), "history");
+      assert.ok(findings.some((f) => f.level === "todo" && /does not parse/.test(f.text)));
+      assert.ok(findings.some((f) => f.level === "todo" && /projects folder of its own/.test(f.text)));
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("the CLI's user-facing commands", () => {
+  test("help lists every command", () => {
+    const sb = makeSandbox();
+    try {
+      const r = sb.node("src/profiles.cjs", ["help"]);
+      assert.equal(r.status, 0);
+      for (const cmd of ["ccc list", "ccc add", "ccc login <n>", "ccc logout <n>", "ccc rename", "ccc remove", "ccc repair", "ccc help"]) {
+        assert.ok(r.stdout.includes(cmd), `help should mention ${cmd}`);
+      }
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("repair exits 0 when nothing needs the user, 1 when something does", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.writeJson(sb.configPath, { accounts: { 2: { name: "Two", configDir: "account2" } } });
+
+      const first = sb.node("src/profiles.cjs", ["repair"]);
+      assert.equal(first.status, 1, first.stdout);
+      assert.match(first.stdout, /\[2\] Two/);
+      assert.match(first.stdout, /! not signed in — run: ccc login 2/);
+
+      sb.signIn("account2", { email: "two@example.com" });
+      const second = sb.node("src/profiles.cjs", ["repair"]);
+      assert.equal(second.status, 0, second.stdout);
+      assert.match(second.stdout, /Everything is in order/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("repair of one slot checks only that slot", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.node("src/profiles.cjs", ["repair", "2"]);
+      assert.match(r.stdout, /\[2\]/);
+      assert.doesNotMatch(r.stdout, /\[1\]|\[3\]/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("repair stops at a config.json it cannot read", () => {
+    const sb = makeSandbox();
+    try {
+      mkdirSync(sb.profilesDir, { recursive: true });
+      writeFileSync(sb.configPath, "{ nope");
+      const r = sb.node("src/profiles.cjs", ["repair"]);
+      assert.equal(r.status, 2);
+      assert.equal(readFileSync(sb.configPath, "utf8"), "{ nope");
+    } finally {
+      sb.cleanup();
+    }
   });
 });

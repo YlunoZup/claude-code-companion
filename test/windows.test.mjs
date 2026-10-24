@@ -351,3 +351,75 @@ describe("ccc.bat missing dependencies", { skip }, () => {
     }
   });
 });
+
+describe("ccc.bat commands", { skip }, () => {
+  let sb;
+  let ccc;
+  before(() => {
+    sb = makeSandbox();
+    const r = cmd(sb, join(REPO_ROOT, "install.bat"));
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    ccc = join(sb.home, ".local", "bin", "ccc.bat");
+  });
+  after(() => sb.cleanup());
+
+  test("help lists every command", () => {
+    const r = cmd(sb, ccc, ["help"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /ccc login <n>/);
+    assert.match(r.stdout, /ccc repair \[n\]/);
+  });
+
+  test("list prints the overview without a prompt", () => {
+    const r = cmd(sb, ccc, ["list"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.match(r.stdout, /Account Switcher/);
+    assert.doesNotMatch(r.stderr, /Select account/);
+  });
+
+  test("login runs claude auth login in that profile", () => {
+    cmd(sb, ccc, ["login", "2"]);
+    const call = lastClaudeCall(sb);
+    assert.equal(call.configDir, join(sb.profilesDir, "account2"));
+    assert.equal(call.args.trim(), "auth login");
+  });
+
+  test("logout of slot 1 signs the default profile out", () => {
+    cmd(sb, ccc, ["logout", "1"]);
+    const call = lastClaudeCall(sb);
+    assert.equal(call.configDir, "");
+    assert.equal(call.args.trim(), "auth logout");
+  });
+
+  test("relogin passes what follows to claude auth login", () => {
+    cmd(sb, ccc, ["relogin", "3", "--email", "client@example.com"]);
+    const call = lastClaudeCall(sb);
+    assert.equal(call.configDir, join(sb.profilesDir, "account3"));
+    assert.equal(call.args.trim(), "auth login --email client@example.com");
+  });
+
+  test("a command without a number says how to use it", () => {
+    const r = cmd(sb, ccc, ["login"]);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stdout, /Usage: ccc login <number>/);
+  });
+
+  test("rename changes the name in config.json", () => {
+    const r = cmd(sb, ccc, ["rename", "2", "Client", "Work"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(JSON.parse(readFileSync(sb.configPath, "utf8")).accounts["2"].name, "Client Work");
+  });
+
+  test("repair of one account checks that account", () => {
+    const r = cmd(sb, ccc, ["repair", "2"]);
+    assert.match(r.stdout, /\[2\]/);
+    assert.doesNotMatch(r.stdout, /\[1\]|\[3\]/);
+  });
+
+  test("remove takes the account off the list and keeps its folder", () => {
+    const r = cmd(sb, ccc, ["remove", "3"]);
+    assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+    assert.equal(JSON.parse(readFileSync(sb.configPath, "utf8")).accounts["3"], undefined);
+    assert.ok(existsSync(join(sb.profilesDir, "account3")));
+  });
+});

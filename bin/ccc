@@ -1,8 +1,9 @@
 #!/bin/bash
 # Claude Code Account Switcher
-# Usage: ccc [args...]    - launches claude with account picker
-#        ccc N [args...]  - launches directly with Account N
-#        ccc add [name]   - add a new account
+# Usage: ccc [args...]    - pick an account (who it is signed in as, live usage)
+#        ccc N [args...]  - launch directly with Account N
+#        ccc help         - every command: list, add, login, logout, rename,
+#                           remove, repair
 #
 # Named "ccc", not "cc", because /usr/bin/cc is the C compiler on macOS.
 
@@ -33,6 +34,19 @@ require_claude() {
     fi
 }
 
+require_picker() {
+    if [[ ! -f "$PICKER" ]]; then
+        die "$PICKER is missing. Re-run the installer:  bash install.sh"
+    fi
+}
+
+# A command that acts on one account takes its number next: `ccc login 3`.
+require_slot() {
+    if [[ ! "${2-}" =~ ^-?[0-9]+$ ]]; then
+        die "Usage: ccc $1 <number>   (ccc list shows the numbers)"
+    fi
+}
+
 # Every account shares ONE session history: <profile>/projects is a link to
 # ~/.claude/projects, so /resume and the memory dir are common to all accounts.
 # A profile that gets created on first login (rather than by `ccc add`) would
@@ -55,65 +69,130 @@ ensure_statusline() {
     return 0
 }
 
-# ── ccc add [name] — add a new account ────────────────────────
-if [[ "${1-}" == "add" ]]; then
-    shift
-    require_runtime
-    CUSTOM_NAME="$*"
-
-    NEXT=$(node "$PROFILES_LIB" next-account-number) || exit
-    [[ -z "$NEXT" ]] && die "Could not determine the next account number."
-
-    # Prompt for name if not provided
-    if [[ -z "$CUSTOM_NAME" ]]; then
-        read -rp "  Account name [Account $NEXT]: " CUSTOM_NAME
-        [[ -z "$CUSTOM_NAME" ]] && CUSTOM_NAME="Account $NEXT"
+# Point CLAUDE_CONFIG_DIR at a profile — unset for the default one — with the
+# profile wired up before anything runs in it. Takes what resolve-account and
+# the picker print: a profile directory, or __DEFAULT__.
+use_profile() {
+    if [[ "$1" == "__DEFAULT__" ]]; then
+        unset CLAUDE_CONFIG_DIR
+        ensure_statusline "$HOME/.claude"
+    else
+        export CLAUDE_CONFIG_DIR="$1"
+        ensure_shared_projects "$1"
+        ensure_statusline "$1"
     fi
+}
 
-    # The name travels through the environment and the config path never leaves
-    # profiles.cjs, so neither can break out into shell or JavaScript syntax.
-    ACCT_DIR=$(CC_ACCOUNT_NAME="$CUSTOM_NAME" node "$PROFILES_LIB" add-account "$NEXT") || exit
+# config.json decides; with no entry for this slot, slot 1 is the default
+# profile and anything else follows the accountN naming convention.
+resolve_slot() {
+    node "$PROFILES_LIB" resolve-account "${1#-}"
+}
 
-    echo ""
-    echo "  Account $NEXT added!"
-    echo ""
-    echo "  Name:      $CUSTOM_NAME"
-    echo "  Directory:  $ACCT_DIR"
-    echo ""
-    echo "  Run 'ccc $NEXT' to log in and start using it."
-    echo ""
-    exit 0
-fi
+case "${1-}" in
+    # ── ccc help ───────────────────────────────────────────────
+    help | -h | --help)
+        require_runtime
+        exec node "$PROFILES_LIB" help
+        ;;
+
+    # ── ccc list — every account with its live usage ────────────
+    list | ls | status)
+        require_runtime
+        require_picker
+        exec node "$PICKER" --list
+        ;;
+
+    # ── ccc add [name] — add a new account ──────────────────────
+    add)
+        shift
+        require_runtime
+        CUSTOM_NAME="$*"
+
+        NEXT=$(node "$PROFILES_LIB" next-account-number) || exit
+        [[ -z "$NEXT" ]] && die "Could not determine the next account number."
+
+        # Prompt for name if not provided
+        if [[ -z "$CUSTOM_NAME" ]]; then
+            read -rp "  Account name [Account $NEXT]: " CUSTOM_NAME
+            [[ -z "$CUSTOM_NAME" ]] && CUSTOM_NAME="Account $NEXT"
+        fi
+
+        # The name travels through the environment and the config path never
+        # leaves profiles.cjs, so neither can break out into shell or JavaScript
+        # syntax.
+        ACCT_DIR=$(CC_ACCOUNT_NAME="$CUSTOM_NAME" node "$PROFILES_LIB" add-account "$NEXT") || exit
+
+        echo ""
+        echo "  Account $NEXT added!"
+        echo ""
+        echo "  Name:      $CUSTOM_NAME"
+        echo "  Directory:  $ACCT_DIR"
+        echo ""
+        echo "  Run 'ccc login $NEXT' to sign it in."
+        echo ""
+        exit 0
+        ;;
+
+    # ── ccc rename <n> <name> ───────────────────────────────────
+    rename)
+        require_slot rename "${2-}"
+        [[ -z "${3-}" ]] && die "Usage: ccc rename <number> <new name>"
+        require_runtime
+        SLOT="${2#-}"
+        shift 2
+        CC_ACCOUNT_NAME="$*" exec node "$PROFILES_LIB" rename-account "$SLOT"
+        ;;
+
+    # ── ccc remove <n> — off the list; its folder is kept ───────
+    remove | rm)
+        require_slot remove "${2-}"
+        require_runtime
+        exec node "$PROFILES_LIB" remove-account "${2#-}"
+        ;;
+
+    # ── ccc repair [n] ──────────────────────────────────────────
+    repair)
+        require_runtime
+        if [[ -n "${2-}" ]]; then
+            require_slot repair "$2"
+            exec node "$PROFILES_LIB" repair "${2#-}"
+        fi
+        exec node "$PROFILES_LIB" repair
+        ;;
+
+    # ── ccc login|logout <n> — Claude Code's own sign-in, for that slot
+    login | relogin | logout)
+        ACTION=login
+        [[ "$1" == logout ]] && ACTION=logout
+        require_slot "$1" "${2-}"
+        SLOT="$2"
+        shift 2
+        require_runtime
+        require_claude
+
+        TARGET=$(resolve_slot "$SLOT") || exit
+        use_profile "$TARGET"
+        exec claude auth "$ACTION" "$@"
+        ;;
+esac
 
 # ── ccc <number> — quick-switch ───────────────────────────────
 if [[ "${1-}" =~ ^-?[0-9]+$ ]]; then
-    ACCT="${1#-}"
+    ACCT="$1"
     shift
     require_runtime
     require_claude
 
-    # config.json decides; with no entry for this slot, slot 1 is the default
-    # profile and anything else follows the accountN naming convention.
-    TARGET=$(node "$PROFILES_LIB" resolve-account "$ACCT") || exit
-
-    if [[ "$TARGET" == "__DEFAULT__" ]]; then
-        unset CLAUDE_CONFIG_DIR
-        ensure_statusline "$HOME/.claude"
-    else
-        export CLAUDE_CONFIG_DIR="$TARGET"
-        ensure_shared_projects "$TARGET"
-        ensure_statusline "$TARGET"
-    fi
-
+    TARGET=$(resolve_slot "$ACCT") || exit
+    use_profile "$TARGET"
     exec claude "$@"
 fi
 
 # ── ccc — interactive picker ──────────────────────────────────
 require_runtime
 require_claude
-if [[ ! -f "$PICKER" ]]; then
-    die "$PICKER is missing. Re-run the installer:  bash install.sh"
-fi
+require_picker
 
 profile_path=$(node "$PICKER") || exit
 
@@ -121,13 +200,5 @@ if [[ -z "$profile_path" ]]; then
     exit 0
 fi
 
-if [[ "$profile_path" == "__DEFAULT__" ]]; then
-    unset CLAUDE_CONFIG_DIR
-    ensure_statusline "$HOME/.claude"
-else
-    export CLAUDE_CONFIG_DIR="$profile_path"
-    ensure_shared_projects "$profile_path"
-    ensure_statusline "$profile_path"
-fi
-
+use_profile "$profile_path"
 exec claude "$@"

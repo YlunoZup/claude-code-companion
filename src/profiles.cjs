@@ -17,6 +17,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 
 const KEYCHAIN_SERVICE = "Claude Code-credentials";
 
@@ -231,6 +232,15 @@ function shellWords(command, platform) {
   return words;
 }
 
+// Whether two paths name the same file, allowing for the forward slashes
+// statusLineCommand writes on Windows, where case does not matter either.
+function samePath(a, b, platform) {
+  if ((platform || process.platform) === "win32") {
+    return path.win32.normalize(a).toLowerCase() === path.win32.normalize(b).toLowerCase();
+  }
+  return path.posix.normalize(a) === path.posix.normalize(b);
+}
+
 // The .claude-profiles script a statusLine command runs, or null when it runs
 // something else. A path only the shell could finish — ~, $HOME, %USERPROFILE%
 // — also gives null: if we cannot tell whether the script exists, we must not
@@ -271,7 +281,11 @@ function ensureStatusLine(settingsPath, profilesDir, platform) {
     }
     const script = statusLineScript(current.command, platform);
     if (!script) return { status: "custom" };
-    if (fs.existsSync(script)) return { status: "current" };
+    // Pointing at statusline.js itself counts even when it is missing: writing
+    // the same path back cannot bring it back, the installer can.
+    if (fs.existsSync(script) || samePath(script, path.join(profilesDir, "statusline.js"), platform)) {
+      return { status: "current" };
+    }
     status = "repointed";
   }
 
@@ -356,6 +370,66 @@ function keychainService(dir, isDefault) {
   return `${KEYCHAIN_SERVICE}-${crypto.createHash("sha256").update(dir).digest("hex").slice(0, 8)}`;
 }
 
+// Whether the Keychain holds a login for this profile. Attributes only — no -w
+// — so this never reads the secret and never raises a Keychain prompt.
+//
+// CCC_NO_KEYCHAIN skips the lookup. The default profile's service name does not
+// depend on HOME, so a test with a throwaway HOME would otherwise find the real
+// one.
+function inKeychain(dir, isDefault, platform) {
+  if ((platform || process.platform) !== "darwin" || process.env.CCC_NO_KEYCHAIN) return false;
+  try {
+    execFileSync("security", ["find-generic-password", "-s", keychainService(dir, isDefault)], {
+      stdio: "ignore",
+      timeout: 3000,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Who a profile is signed in as, as far as can be told without reading a
+// secret. Signed in means a Keychain entry or, as older builds, Linux and
+// Windows keep it, <dir>/.credentials.json. Identity comes from the profile's
+// .claude.json, which Claude Code writes at login: the default profile's sits
+// at ~/.claude.json in the home directory, every other profile keeps its own
+// inside the config dir.
+function accountState(configDir, { home, platform } = {}) {
+  const p = paths(home);
+  const isDefault = !configDir;
+  const dir = isDefault ? p.claude : path.join(p.profiles, configDir);
+  const state = {
+    dir,
+    isDefault,
+    signedIn: inKeychain(dir, isDefault, platform),
+    email: null,
+    displayName: null,
+    accountUuid: null,
+    subscription: null,
+    tier: null,
+  };
+
+  const creds = readJsonFile(path.join(dir, ".credentials.json"));
+  if (creds.status === "ok") {
+    const oauth = creds.value.claudeAiOauth || {};
+    state.signedIn = true;
+    state.subscription = oauth.subscriptionType || null;
+    state.tier = oauth.rateLimitTier || null;
+  }
+
+  const identity = readJsonFile(isDefault ? path.join(p.home, ".claude.json") : path.join(dir, ".claude.json"));
+  if (identity.status === "ok") {
+    const acct = identity.value.oauthAccount || {};
+    state.email = acct.emailAddress || null;
+    state.displayName = acct.displayName || null;
+    state.accountUuid = acct.accountUuid || null;
+    state.subscription = state.subscription || acct.organizationType || null; // claude_max | claude_pro | ...
+    state.tier = state.tier || acct.organizationRateLimitTier || null; // default_claude_max_20x | ...
+  }
+  return state;
+}
+
 // ── Composite operation used by `ccc add` ────────────────────
 
 function addAccount({ home, key, name, platform }) {
@@ -379,6 +453,110 @@ function addAccount({ home, key, name, platform }) {
   return { status: "ok", key: String(key), name, dirName, dir, settings, shared };
 }
 
+// ── Renaming and removing ────────────────────────────────────
+
+function renameAccount({ home, key, name }) {
+  const p = paths(home);
+  const read = readConfig(p.config);
+  if (read.status !== "ok") return { status: read.status === "missing" ? "no-account" : read.status, error: read.error };
+
+  const entry = read.config.accounts[String(key)];
+  if (!entry || typeof entry !== "object") return { status: "no-account" };
+
+  const previous = entry.name;
+  entry.name = name;
+  writeJsonAtomic(p.config, read.config);
+  return { status: "ok", previous };
+}
+
+// Takes the account off the list and nothing more. Its folder holds its
+// settings and session bookkeeping, and on macOS its login stays in the
+// Keychain until `ccc logout` clears it, so deleting either is left to the user.
+function removeAccount({ home, key }) {
+  const p = paths(home);
+  const read = readConfig(p.config);
+  if (read.status !== "ok") return { status: read.status === "missing" ? "no-account" : read.status, error: read.error };
+
+  const entry = read.config.accounts[String(key)];
+  if (!entry) return { status: "no-account" };
+
+  delete read.config.accounts[String(key)];
+  writeJsonAtomic(p.config, read.config);
+  const dirName = entry && typeof entry === "object" && entry.configDir ? entry.configDir : null;
+  return { status: "ok", name: entry.name || null, dir: dirName ? path.join(p.profiles, dirName) : null };
+}
+
+// ── Repair ───────────────────────────────────────────────────
+
+// Check one account and fix what can be fixed without asking: its folder, the
+// shared session history link and the statusline. What only the user can do —
+// signing in, or putting a different Claude account in a slot that duplicates
+// another — is reported along with the command that does it.
+//
+// `earlier` is the states of the accounts listed before this one, so a slot
+// signed into the same Claude account as an earlier slot can be pointed out.
+//
+// Returns findings of { level: "ok" | "fixed" | "todo", text }.
+function repairAccount(key, entry, { home, platform, earlier = [] } = {}) {
+  const p = paths(home);
+  const findings = [];
+  const note = (level, text) => findings.push({ level, text });
+  const configDir = entry && typeof entry === "object" && entry.configDir ? entry.configDir : null;
+  const dir = configDir ? path.join(p.profiles, configDir) : p.claude;
+
+  if (configDir) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+      note("fixed", "created its folder");
+    }
+    const shared = ensureSharedProjects(dir, p.claude, platform);
+    if (shared.status === "linked") note("fixed", "linked the shared session history");
+    else if (shared.status === "already-linked") note("ok", "shares the session history");
+    else if (shared.status === "exists") note("todo", "keeps a projects folder of its own, so /resume cannot see the other accounts' sessions");
+    else note("todo", `could not link the shared session history${shared.error ? `: ${shared.error.message}` : ""}`);
+  }
+
+  const statusLine = ensureStatusLine(path.join(dir, "settings.json"), p.profiles, platform);
+  if (statusLine.status === "current") note("ok", "statusline is set up");
+  else if (statusLine.status === "custom") note("ok", "uses a statusline of its own");
+  else if (statusLine.status === "repointed") note("fixed", "pointed its statusline back at statusline.js");
+  else if (statusLine.status === "created" || statusLine.status === "added") note("fixed", "added the statusline");
+  else note("todo", "settings.json does not parse, so it was left alone — fix it by hand");
+
+  const state = accountState(configDir, { home, platform });
+  if (!state.signedIn) {
+    note("todo", `not signed in — run: ccc login ${key}`);
+  } else {
+    note("ok", state.email ? `signed in as ${state.email}` : "signed in");
+    const twin = state.accountUuid && earlier.find((o) => o.signedIn && o.accountUuid === state.accountUuid);
+    if (twin) note("todo", `same Claude account as [${twin.key}], so it shares those limits — to use another, run: ccc login ${key}`);
+  }
+
+  return { findings, state: { ...state, key: String(key) } };
+}
+
+// ── What `ccc help` prints ───────────────────────────────────
+
+const HELP = `ccc — Claude Code with any of your accounts
+
+  ccc                      pick an account: who it is signed in as, and its live usage
+  ccc <n> [claude args]    start Claude Code with account n, e.g.  ccc 2 -c
+  ccc list                 show every account and its live usage, then exit
+  ccc add [name]           add an account
+  ccc login <n>            sign account n in again, or into a different Claude account
+  ccc logout <n>           sign account n out
+  ccc rename <n> <name>    rename account n
+  ccc remove <n>           take account n off the list (its folder is kept)
+  ccc repair [n]           check account n, or every account, and fix what it can
+  ccc help                 show this
+
+  Also: relogin = login, ls = list, rm = remove.
+
+Usage is the share of each account's 5-hour and weekly limits still left, live
+from Claude Code. Set CCC_NO_USAGE=1 to skip it and open the picker instantly.
+
+Accounts are listed in ~/.claude-profiles/config.json.`;
+
 // ── CLI ──────────────────────────────────────────────────────
 //
 // Exit codes: 0 success, 1 usage error, 2 refused because user data would be at
@@ -393,7 +571,11 @@ const USAGE = `usage: profiles.cjs <command> [args]
   ensure-statusline <settings.json> add the statusLine key unless one is set
   ensure-shared-projects <dir>     link <dir>/projects at ~/.claude/projects
   ensure-link <link> <target>      link <link> at <target>, never replacing
-  statusline-command               print the configured statusLine command`;
+  statusline-command               print the configured statusLine command
+  rename-account <slot>            rename a slot (name from CC_ACCOUNT_NAME)
+  remove-account <slot>            take a slot off the list, keeping its files
+  repair [slot]                    check one slot or all of them, fixing what it can
+  help                             print the help ccc shows for \`ccc help\``;
 
 function fail(message) {
   process.stderr.write(`  ${message}\n`);
@@ -483,9 +665,102 @@ function main(argv) {
       process.stdout.write(statusLineCommand(p.profiles));
       return 0;
 
+    case "rename-account": {
+      const key = rest[0];
+      const name = process.env.CC_ACCOUNT_NAME;
+      if (!key || !name) return usage();
+      const result = renameAccount({ home: p.home, key, name });
+      if (result.status === "no-account") return noAccount(key);
+      if (result.status !== "ok") return fail(`Refusing to rewrite ${p.config}: ${result.error.message}`);
+      process.stdout.write(`  Account ${key} is now "${name}".\n`);
+      return 0;
+    }
+
+    case "remove-account": {
+      const key = rest[0];
+      if (!key) return usage();
+      const read = readConfig(p.config);
+      const entry = read.status === "ok" ? read.config.accounts[String(key)] : null;
+      const before = entry && typeof entry === "object" ? accountState(entry.configDir || null, { home: p.home }) : null;
+
+      const result = removeAccount({ home: p.home, key });
+      if (result.status === "no-account") return noAccount(key);
+      if (result.status !== "ok") return fail(`Refusing to rewrite ${p.config}: ${result.error.message}`);
+
+      const lines = [`  Removed account ${key}${result.name ? ` (${result.name})` : ""} from the list.`];
+      if (result.dir) lines.push(`  Its folder is still at ${result.dir}; delete it yourself if you no longer need it.`);
+      if (before && before.signedIn) lines.push(`  It is still signed in. To sign it out as well, run: ccc logout ${key}`);
+      process.stdout.write(lines.join("\n") + "\n");
+      return 0;
+    }
+
+    case "repair":
+      return repairCommand(p, rest[0]);
+
+    case "help":
+      process.stdout.write(HELP + "\n");
+      return 0;
+
     default:
       return usage();
   }
+}
+
+function noAccount(key) {
+  process.stderr.write(`  There is no account ${key}. ccc list shows the numbers.\n`);
+  return 1;
+}
+
+// `ccc repair [slot]`. Exits 0 when nothing is left for the user to do, 1 when
+// something is — the lines marked ! — and 2 when config.json cannot be read.
+function repairCommand(p, slot) {
+  const read = readConfig(p.config);
+  if (read.status !== "ok" && read.status !== "missing") {
+    return fail(`Cannot read ${p.config}: ${read.error.message}`);
+  }
+  const config = read.status === "missing" ? defaultConfig() : read.config;
+  const keys = Object.keys(config.accounts);
+  if (slot !== undefined && !keys.includes(String(slot))) return noAccount(slot);
+
+  const tty = process.stdout.isTTY;
+  const paint = (code, text) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
+  const MARK = { ok: paint("32", "✓"), fixed: paint("36", "+"), todo: paint("33", "!") };
+  const out = (line = "") => process.stdout.write(line + "\n");
+
+  const earlier = [];
+  const counts = { ok: 0, fixed: 0, todo: 0 };
+  for (const key of keys) {
+    const entry = config.accounts[key];
+    if (slot !== undefined && key !== String(slot)) {
+      // Not being repaired, but still needed to spot a duplicate login.
+      const configDir = entry && typeof entry === "object" ? entry.configDir || null : null;
+      earlier.push({ ...accountState(configDir, { home: p.home }), key });
+      continue;
+    }
+
+    const name = entry && typeof entry === "object" && entry.name ? entry.name : `Account ${key}`;
+    const { findings, state } = repairAccount(key, entry, { home: p.home, earlier });
+    earlier.push(state);
+
+    out();
+    out(`  [${key}] ${name}`);
+    for (const finding of findings) {
+      counts[finding.level]++;
+      out(`      ${MARK[finding.level]} ${finding.text}`);
+    }
+  }
+
+  if (!fs.existsSync(p.statusline)) {
+    counts.todo++;
+    out();
+    out(`  ${MARK.todo} ${p.statusline} is missing, so no account shows a statusline — re-run the installer`);
+  }
+
+  out();
+  if (counts.fixed) out(`  Fixed ${counts.fixed} thing${counts.fixed === 1 ? "" : "s"}.`);
+  if (counts.todo) out(`  ${counts.todo} thing${counts.todo === 1 ? " needs" : "s need"} you: the lines marked !`);
+  if (!counts.fixed && !counts.todo) out("  Everything is in order.");
+  return counts.todo ? 1 : 0;
 }
 
 module.exports = {
@@ -507,7 +782,13 @@ module.exports = {
   ensureLink,
   ensureSharedProjects,
   keychainService,
+  inKeychain,
+  accountState,
   addAccount,
+  renameAccount,
+  removeAccount,
+  repairAccount,
+  HELP,
   main,
 };
 

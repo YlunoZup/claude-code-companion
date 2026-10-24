@@ -8,7 +8,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { gitBashCannotUse, makeSandbox } from "./helpers.test.mjs";
+import { gitBashCannotUse, makeSandbox, usageAnswer } from "./helpers.test.mjs";
 
 /** Parse the last recorded stub invocation. */
 function lastCall(sb) {
@@ -445,6 +445,223 @@ describe("shared session history", () => {
       sb.ccc(["6"]);
 
       assert.equal(readFileSync(join(projects, "keep.txt"), "utf8"), "real history");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("ccc help", () => {
+  for (const flag of ["help", "-h", "--help"]) {
+    test(`ccc ${flag} lists every command and launches nothing`, () => {
+      const sb = makeSandbox();
+      try {
+        sb.install();
+        const r = sb.ccc([flag]);
+        assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, /ccc login <n>/);
+        assert.match(r.stdout, /ccc repair \[n\]/);
+        assert.deepEqual(sb.calls(), []);
+      } finally {
+        sb.cleanup();
+      }
+    });
+  }
+});
+
+describe("ccc list", () => {
+  test("prints every account with its live usage, and launches nothing", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.signIn("account2", { email: "work@example.com" });
+      sb.setUsage({ account2: usageAnswer({ fiveHour: 25, weekly: 60 }) });
+
+      const r = sb.ccc(["list"]);
+
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /work@example\.com/);
+      assert.match(r.stdout, /75% left/);
+      assert.match(r.stdout, /40% left/);
+      assert.deepEqual(sb.calls().filter((l) => l.startsWith("claude ")), [], "no session may start");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("ccc login and logout", () => {
+  test("ccc login <n> runs Claude Code's own sign-in in that profile", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["login", "2"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.deepEqual(lastCall(sb), { configDir: join(sb.profilesDir, "account2"), args: "auth login" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("slot 1 signs in the default profile, with CLAUDE_CONFIG_DIR unset", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.ccc(["login", "1"]);
+      assert.deepEqual(lastCall(sb), { configDir: "<unset>", args: "auth login" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("relogin is login, and passes what follows to claude auth login", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.ccc(["relogin", "3", "--email", "client@example.com"]);
+      assert.deepEqual(lastCall(sb), {
+        configDir: join(sb.profilesDir, "account3"),
+        args: "auth login --email client@example.com",
+      });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("ccc logout <n> signs that profile out", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.ccc(["logout", "2"]);
+      assert.deepEqual(lastCall(sb), { configDir: join(sb.profilesDir, "account2"), args: "auth logout" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  // A brand-new slot is signed in like any other launch: wired up first.
+  test("signing in a new slot sets its profile up first", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.ccc(["login", "6"]);
+      const dir = join(sb.profilesDir, "account6");
+      assert.ok(existsSync(join(dir, "projects")), "shared history should be linked");
+      assert.match(sb.readJson(join(dir, "settings.json")).statusLine.command, /statusline\.js/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  for (const command of ["login", "logout"]) {
+    test(`ccc ${command} without a number says how to use it and starts nothing`, () => {
+      const sb = makeSandbox();
+      try {
+        sb.install();
+        const r = sb.ccc([command, "work"]);
+        assert.notEqual(r.status, 0);
+        assert.match(r.stderr, new RegExp(`Usage: ccc ${command} <number>`));
+        assert.deepEqual(sb.calls(), []);
+      } finally {
+        sb.cleanup();
+      }
+    });
+  }
+});
+
+describe("ccc rename and remove", () => {
+  test("rename changes the name and nothing else", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["rename", "2", "Client", "Work"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Account 2 is now "Client Work"/);
+      assert.deepEqual(sb.readJson(sb.configPath).accounts["2"], { name: "Client Work", configDir: "account2" });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("renaming an account that does not exist fails and writes nothing", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const before = readFileSync(sb.configPath, "utf8");
+      const r = sb.ccc(["rename", "9", "Nope"]);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /There is no account 9/);
+      assert.equal(readFileSync(sb.configPath, "utf8"), before);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("rename without a new name says how to use it", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["rename", "2"]);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /Usage: ccc rename <number> <new name>/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("remove takes the account off the list and keeps its folder", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["remove", "2"]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Removed account 2/);
+      assert.equal(sb.readJson(sb.configPath).accounts["2"], undefined);
+      assert.ok(existsSync(join(sb.profilesDir, "account2")), "the folder must be kept");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("ccc repair", () => {
+  test("checks every account and fixes what it can", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      sb.writeJson(join(sb.profilesDir, "account2", "settings.json"), { theme: "dark" });
+
+      const r = sb.ccc(["repair"]);
+
+      assert.match(r.stdout, /\[1\][\s\S]*\[2\][\s\S]*\[3\]/);
+      assert.match(r.stdout, /\+ added the statusline/);
+      assert.match(sb.readJson(join(sb.profilesDir, "account2", "settings.json")).statusLine.command, /statusline\.js/);
+      assert.equal(r.status, 1, "nobody is signed in, so something still needs the user");
+      assert.deepEqual(sb.calls(), [], "repair must not start a session");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("ccc repair <n> checks only that account", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["repair", "3"]);
+      assert.match(r.stdout, /\[3\]/);
+      assert.doesNotMatch(r.stdout, /\[1\]|\[2\]/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("an account number that does not exist is refused", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["repair", "8"]);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /There is no account 8/);
     } finally {
       sb.cleanup();
     }

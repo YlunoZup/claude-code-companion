@@ -1,30 +1,22 @@
 // picker.mjs - Claude Code account switcher UI
 //
-// HOW LOGIN DETECTION WORKS
-// On macOS, Claude Code keeps OAuth credentials in the login Keychain, not on
-// disk. The service name is:
-//     "Claude Code-credentials"                      -> default profile (~/.claude)
-//     "Claude Code-credentials-<sha256(dir)[0:8]>"   -> any profile launched
-//                                                        with CLAUDE_CONFIG_DIR
-// where <dir> is the absolute config dir path, e.g.
-//     sha256("/Users/you/.claude-profiles/account2")[0:8] = 04f595a6
+// Shows every account: who it is signed in as, its plan, and how much of its
+// 5-hour and weekly limits is left right now. Pick one to launch it.
 //
-// We probe with an attribute-only lookup (no -w flag), so macOS never shows a
-// Keychain access prompt and the check costs ~10ms.
+// Sign-in state and identity come from profiles.cjs, which reads neither a token
+// nor any other secret: on macOS it asks the Keychain whether a login exists,
+// attributes only, and identity is plain JSON in the profile's .claude.json.
+// Live usage comes from usage.cjs, which asks Claude Code itself.
 //
-// Older Claude Code builds, Linux and Windows still write
-// <dir>/.credentials.json, so that path is checked too.
-//
-// Plan and identity (email, display name) come from the profile's .claude.json
-// under the "oauthAccount" key, which is plain JSON and needs no Keychain access.
+// With --list it prints the same overview to stdout and exits, for `ccc list`.
 
-import { readFileSync, existsSync, realpathSync } from "fs";
-import { execFileSync } from "child_process";
+import { realpathSync } from "fs";
 import { createInterface } from "readline";
-import { homedir, platform } from "os";
+import { homedir } from "os";
 import { join } from "path";
 import { pathToFileURL } from "url";
 import profiles from "./profiles.cjs";
+import usage from "./usage.cjs";
 
 const HOME = homedir();
 const PROFILES_DIR = join(HOME, ".claude-profiles");
@@ -41,6 +33,7 @@ const c = {
   cyan: "\x1b[36m",
   green: "\x1b[32m",
   yellow: "\x1b[33m",
+  red: "\x1b[31m",
   magenta: "\x1b[35m",
   blue: "\x1b[34m",
   bgDim: "\x1b[48;5;236m",
@@ -58,61 +51,6 @@ function loadConfig(configPath = CONFIG_PATH) {
   if (result.status === "ok") return result.config;
   const reason = result.error ? result.error.message : "unknown error";
   throw new Error(`${configPath} could not be read: ${reason}`);
-}
-
-// ── Credential detection ─────────────────────────────────────
-function inKeychain(service) {
-  if (platform() !== "darwin") return false;
-  try {
-    // No -w: attributes only, so this never triggers a Keychain prompt.
-    execFileSync("security", ["find-generic-password", "-s", service], {
-      stdio: "ignore",
-      timeout: 3000,
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ── Read account info ────────────────────────────────────────
-function getAccountInfo(configDir) {
-  const isDefault = !configDir;
-  const dir = isDefault ? join(HOME, ".claude") : join(PROFILES_DIR, configDir);
-
-  // 1. Logged in? Keychain first, then the legacy on-disk credentials file.
-  let ready = inKeychain(profiles.keychainService(dir, isDefault));
-  let sub = null;
-  let tier = null;
-
-  const credPath = join(dir, ".credentials.json");
-  if (existsSync(credPath)) {
-    try {
-      const oauth =
-        JSON.parse(readFileSync(credPath, "utf8")).claudeAiOauth || {};
-      ready = true;
-      sub = oauth.subscriptionType || null;
-      tier = oauth.rateLimitTier || null;
-    } catch {}
-  }
-
-  // 2. Who is it? The default profile's .claude.json sits at ~/.claude.json,
-  //    every other profile keeps its own inside the config dir.
-  const statePath = isDefault
-    ? join(HOME, ".claude.json")
-    : join(dir, ".claude.json");
-
-  let email = null;
-  let display = null;
-  try {
-    const acct = JSON.parse(readFileSync(statePath, "utf8")).oauthAccount || {};
-    email = acct.emailAddress || null;
-    display = acct.displayName || null;
-    sub = sub || acct.organizationType || null; // claude_max | claude_pro | ...
-    tier = tier || acct.organizationRateLimitTier || null; // default_claude_max_20x | ...
-  } catch {}
-
-  return { ready, sub, tier, email, display };
 }
 
 function formatPlan(info) {
@@ -133,21 +71,59 @@ function formatPlan(info) {
 
 // ── Build Account List ───────────────────────────────────────
 function buildAccounts(config) {
-  return Object.entries(config.accounts).map(([key, acc]) => {
+  const accounts = Object.entries(config.accounts).map(([key, acc]) => {
     const entry = acc && typeof acc === "object" ? acc : {};
-    const info = getAccountInfo(entry.configDir);
+    const state = profiles.accountState(entry.configDir || null);
     return {
       key,
       // A config entry with no name would otherwise render as "undefined".
       name: entry.name ? String(entry.name) : `Account ${key}`,
-      configDir: entry.configDir,
-      ...info,
+      configDir: entry.configDir || null,
+      dir: state.dir,
+      ready: state.signedIn,
+      email: state.email,
+      display: state.displayName,
+      accountUuid: state.accountUuid,
+      sub: state.subscription,
+      tier: state.tier,
+      usage: null,
+      sameAs: null,
     };
   });
+
+  // Two slots signed into one Claude account share its limits, which is easy to
+  // miss when they carry different names. Point the later one at the first.
+  for (const [i, acc] of accounts.entries()) {
+    if (!acc.ready || !acc.accountUuid) continue;
+    const first = accounts.slice(0, i).find((o) => o.ready && o.accountUuid === acc.accountUuid);
+    if (first) acc.sameAs = first.key;
+  }
+  return accounts;
 }
 
 // ── Write to stderr so shell wrapper can capture stdout for data ──
-const log = (msg = "") => process.stderr.write(msg + "\n");
+let write = (text) => process.stderr.write(text);
+const log = (msg = "") => write(msg + "\n");
+
+// ── Live usage ───────────────────────────────────────────────
+// Every signed-in account at once: each answer takes Claude Code a second or
+// two to give. A slot sharing another's login reuses that answer.
+async function loadUsage(accounts) {
+  if (process.env.CCC_NO_USAGE) return;
+  const asking = accounts.filter((a) => a.ready && !a.sameAs);
+  if (asking.length === 0) return;
+
+  // The progress line always goes to stderr, so `ccc list > file` stays clean.
+  const tty = process.stderr.isTTY;
+  process.stderr.write(`  ${c.dim}Checking live usage…${c.reset}${tty ? "" : "\n"}`);
+
+  const answers = await Promise.all(asking.map((a) => usage.fetchUsage(a.configDir ? a.dir : null)));
+  asking.forEach((a, i) => (a.usage = answers[i]));
+  for (const acc of accounts) {
+    if (acc.sameAs) acc.usage = accounts.find((a) => a.key === acc.sameAs).usage;
+  }
+  if (tty) process.stderr.write("\r\x1b[K");
+}
 
 function stripAnsi(str) {
   return str.replace(/\x1b\[[0-9;]*m/g, "");
@@ -158,6 +134,18 @@ function clip(str, max) {
   return str.length > max ? str.slice(0, max - 1) + "…" : str;
 }
 
+// "5h    ██████░░░░  55% left · resets in 4h 2m"
+function usageRow(label, win, now) {
+  if (!win) return `${c.gray}${label.padEnd(6)}${c.reset}${c.dim}no limit reported${c.reset}`;
+  const left = Math.round(win.left);
+  const color = left >= 50 ? c.green : left >= 20 ? c.yellow : c.red;
+  const filled = Math.round(left / 10);
+  const bar = `${color}${"█".repeat(filled)}${c.reset}${c.dim}${"░".repeat(10 - filled)}${c.reset}`;
+  const when = usage.formatResetIn(win.resetsAt, now);
+  const reset = when ? `${c.dim} · resets ${when}${c.reset}` : "";
+  return `${c.gray}${label.padEnd(6)}${c.reset}${bar} ${color}${c.bold}${String(left).padStart(3)}% left${c.reset}${reset}`;
+}
+
 // ── Render UI ────────────────────────────────────────────────
 const W = 58;
 
@@ -166,7 +154,7 @@ function boxRow(content) {
   log(`  ${c.dim}${c.cyan}┃${c.reset}${content}${pad}${c.dim}${c.cyan}┃${c.reset}`);
 }
 
-function render(accounts) {
+function render(accounts, now = Date.now()) {
   const line = "━".repeat(W);
   const blank = "";
 
@@ -183,20 +171,35 @@ function render(accounts) {
     const status = acc.ready ? `${c.green}●${c.reset}` : `${c.dim}○${c.reset}`;
     const planStr = formatPlan(acc);
 
-    // Row 1: slot number, status dot, configured label.
+    // Row 1: slot number, status dot, configured label, and a warning when the
+    // slot shares its login with an earlier one.
+    const twin = acc.sameAs ? `  same login as [${acc.sameAs}]` : "";
     boxRow(
-      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${clip(acc.name, W - 12)}${c.reset}`
+      `   ${c.dim}[${c.reset}${c.white}${c.bold}${acc.key}${c.reset}${c.dim}]${c.reset}  ${status}  ${c.white}${c.bold}${clip(acc.name, W - 12 - twin.length)}${c.reset}${c.yellow}${twin}${c.reset}`
     );
 
     // Row 2: which account this actually is, plus the plan on it.
     const planLen = stripAnsi(planStr).length;
     const who = acc.email || acc.display;
-    if (who) {
+    if (!acc.ready) {
+      boxRow(`         ${planStr}${c.dim}  ·  ccc login ${acc.key}${c.reset}`);
+    } else if (who) {
       const budget = W - 9 - planLen - 5;
       const whoStr = clip(who, budget);
       boxRow(`         ${c.gray}${whoStr}${c.reset}  ${c.dim}·${c.reset}  ${planStr}`);
     } else {
       boxRow(`         ${planStr}`);
+    }
+
+    // Rows 3 and 4: how much of each limit is left.
+    const u = acc.usage;
+    if (u && u.status === "ok") {
+      boxRow(`         ${usageRow("5h", u.fiveHour, now)}`);
+      boxRow(`         ${usageRow("week", u.weekly, now)}`);
+    } else if (u && u.status === "unavailable") {
+      boxRow(`         ${c.dim}no plan limits on this login${c.reset}`);
+    } else if (u) {
+      boxRow(`         ${c.dim}${clip(`usage unavailable: ${u.error}`, W - 10)}${c.reset}`);
     }
 
     boxRow(blank);
@@ -210,70 +213,104 @@ function render(accounts) {
 function prompt(accounts) {
   const rl = createInterface({ input: process.stdin, output: process.stderr });
   const keys = accounts.map((a) => a.key).join("/");
+  rl.setPrompt(
+    `  ${c.white}${c.bold}Select account ${c.dim}[${keys}, r to refresh, q to quit]${c.reset}${c.white}${c.bold}: ${c.reset}`
+  );
 
-  const ask = () => {
-    rl.question(
-      `  ${c.white}${c.bold}Select account ${c.dim}[${keys}, q to quit]${c.reset}${c.white}${c.bold}: ${c.reset}`,
-      (answer) => {
-        const choice = answer.trim();
+  // A refresh takes a second or two. Anything typed meanwhile waits its turn,
+  // rather than arriving while nothing is listening and being lost.
+  let busy = false;
+  let closed = false;
+  const waiting = [];
+  rl.on("close", () => (closed = true));
 
-        if (choice === "q" || choice === "Q" || choice === "") {
-          rl.close();
-          log(`  ${c.dim}Cancelled.${c.reset}`);
-          process.exit(0);
-        }
-
-        const acc = accounts.find((a) => a.key === choice);
-        if (!acc) {
-          log(`  ${c.yellow}Invalid choice. Enter ${keys} or q to quit.${c.reset}`);
-          ask();
-          return;
-        }
-
-        rl.close();
-
-        if (!acc.ready) {
-          log(
-            `\n  ${c.yellow}${acc.name} is not logged in yet; Claude will prompt you to sign in.${c.reset}\n`
-          );
-        }
-
-        // stdout: only the profile path (read by shell wrapper)
-        if (acc.configDir) {
-          process.stdout.write(join(PROFILES_DIR, acc.configDir));
-        } else {
-          process.stdout.write("__DEFAULT__");
-        }
-      }
-    );
+  const next = () => {
+    if (waiting.length) handle(waiting.shift());
+    else if (!closed) rl.prompt();
   };
 
-  ask();
+  const handle = async (line) => {
+    const choice = line.trim();
+
+    if (choice === "q" || choice === "Q" || choice === "") {
+      rl.close();
+      log(`  ${c.dim}Cancelled.${c.reset}`);
+      process.exit(0);
+    }
+
+    if (choice === "r" || choice === "R") {
+      busy = true;
+      await loadUsage(accounts);
+      render(accounts);
+      busy = false;
+      next();
+      return;
+    }
+
+    const acc = accounts.find((a) => a.key === choice);
+    if (!acc) {
+      log(`  ${c.yellow}Invalid choice. Enter ${keys}, r to refresh, or q to quit.${c.reset}`);
+      next();
+      return;
+    }
+
+    rl.close();
+
+    if (!acc.ready) {
+      log(
+        `\n  ${c.yellow}${acc.name} is not logged in yet; Claude will prompt you to sign in.${c.reset}\n`
+      );
+    }
+
+    // stdout: only the profile path (read by shell wrapper)
+    if (acc.configDir) {
+      process.stdout.write(join(PROFILES_DIR, acc.configDir));
+    } else {
+      process.stdout.write("__DEFAULT__");
+    }
+  };
+
+  rl.on("line", (line) => {
+    if (busy) waiting.push(line);
+    else handle(line);
+  });
+  rl.prompt();
 }
 
-function main() {
+async function main(argv = process.argv.slice(2)) {
+  const listOnly = argv.includes("--list");
+  if (listOnly) write = (text) => process.stdout.write(text);
+
+  // Colour is for a terminal: `ccc list > file` or `| grep` gets plain text.
+  // NO_COLOR is the convention for turning it off everywhere.
+  if (process.env.NO_COLOR || (listOnly && !process.stdout.isTTY)) {
+    for (const key of Object.keys(c)) c[key] = "";
+  }
+
   let accounts;
   try {
     accounts = buildAccounts(loadConfig());
   } catch (err) {
-    log(`  ${c.yellow}${err.message}${c.reset}`);
-    log(`  ${c.dim}Fix it, or delete it to fall back to the defaults.${c.reset}`);
+    process.stderr.write(`  ${c.yellow}${err.message}${c.reset}\n`);
+    process.stderr.write(`  ${c.dim}Fix it, or delete it to fall back to the defaults.${c.reset}\n`);
     process.exit(1);
   }
 
+  await loadUsage(accounts);
   render(accounts);
-  prompt(accounts);
+  if (!listOnly) prompt(accounts);
 }
 
 export {
   buildAccounts,
   clip,
   formatPlan,
-  getAccountInfo,
   loadConfig,
+  loadUsage,
   main,
   render,
   stripAnsi,
+  usageRow,
   W,
 };
 

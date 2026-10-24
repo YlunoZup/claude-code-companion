@@ -90,8 +90,9 @@ ok "Installed profiles.cjs -> $PROFILES_LIB"
 # as ESM and the statusline would die on every refresh.
 printf '{\n  "type": "commonjs"\n}\n' > "$PROFILES_DIR/package.json"
 
-# ── Copy picker.mjs ──────────────────────────────────────────
+# ── Copy picker.mjs, and usage.cjs which it reads live usage with ──
 info "Installing picker..."
+cp "$SCRIPT_DIR/src/usage.cjs" "$PROFILES_DIR/usage.cjs"
 cp "$SCRIPT_DIR/src/picker.mjs" "$PROFILES_DIR/picker.mjs"
 ok "Installed picker.mjs -> $PROFILES_DIR/picker.mjs"
 

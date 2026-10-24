@@ -61,6 +61,11 @@ export function makeSandbox(opts = {}) {
     USERPROFILE: home,
     PATH: pathParts.join(delimiter),
     CCC_TEST_CALLS: calls,
+    // What the stub claude answers a usage request with; see setUsage.
+    CCC_TEST_USAGE: join(root, "usage.json"),
+    // The default profile's Keychain service name does not depend on HOME, so
+    // without this a test on a Mac would find the developer's real login.
+    CCC_NO_KEYCHAIN: "1",
     // Test files run in parallel, so spawning git from the statusline can take
     // longer than the production default. Without this the statusline tests
     // are flaky under load rather than wrong.
@@ -121,6 +126,29 @@ export function makeSandbox(opts = {}) {
       });
     },
 
+    /**
+     * What the stub claude answers a get_usage request with, per profile: keys
+     * are the profile's directory name, or "default". A value is the answer
+     * Claude Code gives — see usageAnswer() — or {__error: message} for a
+     * failed request, {__silent: true} for no answer at all, and {__sleepMs: n}
+     * alongside an answer to give it late. Unlisted profiles get no answer.
+     */
+    setUsage(map) {
+      writeFileSync(env.CCC_TEST_USAGE, JSON.stringify(map));
+    },
+
+    /** Mark a profile signed in the way Linux and Windows record it. */
+    signIn(configDir, { email, accountUuid, tier } = {}) {
+      const dir = configDir ? join(home, ".claude-profiles", configDir) : join(home, ".claude");
+      this.writeJson(join(dir, ".credentials.json"), { claudeAiOauth: {} });
+      if (email || accountUuid || tier) {
+        const state = configDir ? join(dir, ".claude.json") : join(home, ".claude.json");
+        this.writeJson(state, {
+          oauthAccount: { emailAddress: email, accountUuid, organizationRateLimitTier: tier },
+        });
+      }
+    },
+
     writeJson(file, value) {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, JSON.stringify(value, null, 2) + "\n");
@@ -137,11 +165,16 @@ export function makeSandbox(opts = {}) {
 }
 
 // A stub that logs its name, CLAUDE_CONFIG_DIR and arguments instead of doing
-// anything. Windows gets two, as npm installs two: a .cmd for cmd.exe, and an
-// extensionless shell script, which is the only kind Git Bash can run.
+// anything — except `-p`, a usage request, which goes to USAGE_STUB. Windows
+// gets two, as npm installs two: a .cmd for cmd.exe, and an extensionless shell
+// script, which is the only kind Git Bash can run.
 function writeStub(dir, name, logPath) {
+  const usageStub = join(dir, "claude-usage.mjs");
+  writeFileSync(usageStub, USAGE_STUB);
+
   const script = [
     "#!/bin/sh",
+    `if [ "$1" = "-p" ]; then exec node "${usageStub.replace(/\\/g, "/")}" "$@"; fi`,
     // Drain stdin first, as the real program would: a stub that exits without
     // reading what it was piped makes the parent's write fail with EPIPE.
     "cat > /dev/null 2>&1",
@@ -155,13 +188,65 @@ function writeStub(dir, name, logPath) {
   if (IS_WINDOWS) {
     const lines = [
       "@echo off",
+      'if "%~1"=="-p" goto usage',
       // The same drain, for the same reason.
       "more > nul 2>&1",
       `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
       "exit /b 0",
+      ":usage",
+      `node "${usageStub}" %*`,
+      "exit /b %ERRORLEVEL%",
     ];
     writeFileSync(join(dir, `${name}.cmd`), lines.join("\r\n") + "\r\n");
   }
+}
+
+// Stands in for `claude -p` answering one get_usage control request, with what
+// the test set through setUsage() for this profile, and logs how it was run.
+const USAGE_STUB = `import { appendFileSync, readFileSync } from "node:fs";
+import { basename } from "node:path";
+
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+
+const dir = process.env.CLAUDE_CONFIG_DIR;
+const key = dir ? basename(dir) : "default";
+appendFileSync(
+  process.env.CCC_TEST_CALLS,
+  \`claude-usage cfg=[\${dir ?? "<unset>"}] args=[\${process.argv.slice(2).join(" ")}]\\n\`
+);
+
+let answers = {};
+try {
+  answers = JSON.parse(readFileSync(process.env.CCC_TEST_USAGE, "utf8"));
+} catch {}
+const answer = answers[key];
+if (!answer || answer.__silent) process.exit(0);
+if (answer.__sleepMs) await new Promise((r) => setTimeout(r, answer.__sleepMs));
+
+const request = JSON.parse(input.split("\\n")[0] || "{}");
+const response = answer.__error
+  ? { subtype: "error", request_id: request.request_id, error: answer.__error }
+  : { subtype: "success", request_id: request.request_id, response: answer };
+process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n");
+process.stdout.write(JSON.stringify({ type: "control_response", response }) + "\\n");
+`;
+
+/**
+ * A get_usage answer in the shape Claude Code gives one. Percentages are the
+ * share used, as the endpoint reports them; resets are epoch ms, or null for a
+ * window that has not started.
+ */
+export function usageAnswer({ fiveHour = 0, weekly = 0, fiveHourReset = null, weeklyReset = null, subscription = "pro" } = {}) {
+  const iso = (ms) => (ms === null ? null : new Date(ms).toISOString());
+  return {
+    subscription_type: subscription,
+    rate_limits_available: true,
+    rate_limits: {
+      five_hour: { utilization: fiveHour, resets_at: iso(fiveHourReset) },
+      seven_day: { utilization: weekly, resets_at: iso(weeklyReset) },
+    },
+  };
 }
 
 function runBash(script, args, env, input, cwd) {

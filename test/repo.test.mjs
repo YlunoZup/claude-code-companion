@@ -16,6 +16,7 @@ const BATCH_FILES = ["install.bat", join("bin", "ccc.bat")];
 const SOURCE_FILES = [
   join("src", "profiles.cjs"),
   join("src", "picker.mjs"),
+  join("src", "usage.cjs"),
   join("src", "statusline.js"),
 ];
 
@@ -95,6 +96,7 @@ describe("the installers ship what they reference", () => {
   const referenced = [
     join("src", "profiles.cjs"),
     join("src", "picker.mjs"),
+    join("src", "usage.cjs"),
     join("src", "statusline.js"),
     "config.example.json",
     join("bin", "ccc"),
@@ -122,7 +124,7 @@ describe("the installers ship what they reference", () => {
   test("install.sh and install.bat copy the same set of files", () => {
     const sh = read("install.sh");
     const bat = read("install.bat");
-    for (const name of ["profiles.cjs", "picker.mjs", "statusline.js", "config.example.json"]) {
+    for (const name of ["profiles.cjs", "picker.mjs", "usage.cjs", "statusline.js", "config.example.json"]) {
       assert.ok(sh.includes(name), `install.sh never mentions ${name}`);
       assert.ok(bat.includes(name), `install.bat never mentions ${name}`);
     }
@@ -158,14 +160,23 @@ describe("no credentials in the tree", () => {
     });
   }
 
-  test("the picker never asks the Keychain for a secret value", () => {
-    const picker = read(join("src", "picker.mjs"));
-    assert.ok(picker.includes("find-generic-password"), "expected the attribute-only probe");
+  test("the login check never asks the Keychain for a secret value", () => {
+    const lib = read(join("src", "profiles.cjs"));
+    assert.ok(lib.includes("find-generic-password"), "expected the attribute-only probe");
     assert.doesNotMatch(
-      picker,
+      lib,
       /find-generic-password[^)]*"-w"/,
       "-w would read the secret and trigger a Keychain prompt"
     );
+  });
+
+  // Live usage comes from Claude Code itself, which handles the token. Reading
+  // one here would also mean refreshing it here, racing Claude Code.
+  test("live usage never touches a credential", () => {
+    for (const file of [join("src", "usage.cjs"), join("src", "picker.mjs")]) {
+      const source = read(file);
+      assert.doesNotMatch(source, /security|\.credentials\.json|accessToken|refreshToken/, file);
+    }
   });
 });
 

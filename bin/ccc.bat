@@ -1,8 +1,9 @@
 @echo off
 :: Claude Code Account Switcher (Windows CMD)
-:: Usage: ccc [args...]    - launches claude with account picker
+:: Usage: ccc [args...]    - pick an account (who it is signed in as, live usage)
 ::        ccc N [args...]  - launches directly with Account N
-::        ccc add [name]   - add a new account
+::        ccc help         - every command: list, add, login, logout, rename,
+::                           remove, repair
 ::
 :: Everything that touches config.json or settings.json goes through
 :: profiles.cjs. Nothing on this page embeds JavaScript source, which is what
@@ -31,11 +32,38 @@ set "ARG1=%~1"
 set "REST="
 for /f "tokens=1,*" %%a in ("%*") do set "REST=%%b"
 
+if /i "%ARG1%"=="help" goto :help
+if /i "%ARG1%"=="-h" goto :help
+if /i "%ARG1%"=="--help" goto :help
+if /i "%ARG1%"=="list" goto :list
+if /i "%ARG1%"=="ls" goto :list
+if /i "%ARG1%"=="status" goto :list
 if /i "%ARG1%"=="add" goto :add
+if /i "%ARG1%"=="rename" goto :rename
+if /i "%ARG1%"=="remove" goto :remove
+if /i "%ARG1%"=="rm" goto :remove
+if /i "%ARG1%"=="repair" goto :repair
+if /i "%ARG1%"=="login" goto :login
+if /i "%ARG1%"=="relogin" goto :login
+if /i "%ARG1%"=="logout" goto :logout
 
 echo %ARG1%| findstr /r "^-*[0-9][0-9]*$" >nul 2>nul
 if errorlevel 1 goto :picker
 goto :quickswitch
+
+:: ── ccc help ──────────────────────────────────────────────
+:help
+node "%PROFILES_LIB%" help
+exit /b %ERRORLEVEL%
+
+:: ── ccc list — every account with its live usage ───────────
+:list
+if not exist "%PICKER%" (
+    echo   %PICKER% is missing. Re-run the installer:  install.bat
+    exit /b 1
+)
+node "%PICKER%" --list
+exit /b %ERRORLEVEL%
 
 :: ── ccc add [name] — add a new account ─────────────────────
 :add
@@ -65,9 +93,65 @@ echo.
 echo   Name:      !CUSTOM_NAME!
 echo   Directory:  !ACCT_DIR!
 echo.
-echo   Run "ccc !NEXT!" to log in and start using it.
+echo   Run "ccc login !NEXT!" to sign it in.
 echo.
 exit /b 0
+
+:: ── ccc rename ^<n^> ^<name^> ─────────────────────────────────
+:rename
+call :take_slot
+if errorlevel 1 goto :rename_usage
+if not defined MORE goto :rename_usage
+set "CC_ACCOUNT_NAME=!MORE!"
+node "%PROFILES_LIB%" rename-account !SLOT!
+exit /b !ERRORLEVEL!
+:rename_usage
+echo   Usage: ccc rename ^<number^> ^<new name^>
+exit /b 1
+
+:: ── ccc remove ^<n^> — off the list; its folder is kept ──────
+:remove
+call :take_slot
+if errorlevel 1 (
+    echo   Usage: ccc remove ^<number^>
+    exit /b 1
+)
+node "%PROFILES_LIB%" remove-account !SLOT!
+exit /b !ERRORLEVEL!
+
+:: ── ccc repair [n] ──────────────────────────────────────────
+:repair
+if not defined REST (
+    node "%PROFILES_LIB%" repair
+    exit /b !ERRORLEVEL!
+)
+call :take_slot
+if errorlevel 1 (
+    echo   Usage: ccc repair [number]
+    exit /b 1
+)
+node "%PROFILES_LIB%" repair !SLOT!
+exit /b !ERRORLEVEL!
+
+:: ── ccc login^|logout ^<n^> — Claude Code's own sign-in, for that slot
+:login
+set "AUTH_ACTION=login"
+goto :auth
+:logout
+set "AUTH_ACTION=logout"
+:auth
+call :take_slot
+if errorlevel 1 (
+    echo   Usage: ccc !AUTH_ACTION! ^<number^>   ^(ccc list shows the numbers^)
+    exit /b 1
+)
+for /f "delims=" %%d in ('node "%PROFILES_LIB%" resolve-account !SLOT!') do set "TARGET=%%d"
+if not defined TARGET (
+    echo   Error: could not resolve account !SLOT!.
+    exit /b 1
+)
+call :launch "!TARGET!" "auth !AUTH_ACTION! !MORE!"
+exit /b !ERRORLEVEL!
 
 :: ── ccc ^<number^> — quick-switch ────────────────────────────
 :quickswitch
@@ -121,3 +205,20 @@ if "%TARGET_DIR%"=="__DEFAULT__" (
 
 call claude %LAUNCH_ARGS%
 exit /b %ERRORLEVEL%
+
+:: ── The account number a command acts on ───────────────────
+:: Splits REST into SLOT, the number (a leading dash is dropped, as ccc -2 has
+:: always allowed), and MORE, whatever follows it. Fails when there is no
+:: number, so the caller can print its own usage line.
+:take_slot
+set "SLOT="
+set "MORE="
+for /f "tokens=1,*" %%a in ("!REST!") do (
+    set "SLOT=%%a"
+    set "MORE=%%b"
+)
+if not defined SLOT exit /b 1
+set "SLOT=!SLOT:-=!"
+echo !SLOT!| findstr /r "^[0-9][0-9]*$" >nul 2>nul
+if errorlevel 1 exit /b 1
+exit /b 0

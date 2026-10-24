@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Live usage in the picker.** Every signed-in account shows how much of its
+  5-hour and weekly limits is left, and when each resets. The figures come from
+  Claude Code itself: `ccc` starts `claude -p` in each profile with a single
+  `get_usage` control request — no prompt, so no model call; hooks off; nothing
+  saved — and asks every account at once. `ccc` never reads a token: Claude Code
+  refreshes an expired one under its own locks, so even an account unused for a
+  day shows live numbers. `r` in the picker asks again; `CCC_NO_USAGE=1` leaves
+  usage out.
+- The picker shows which Claude account each slot is signed into, and flags a
+  slot signed into the same account as an earlier one (`same login as [n]`),
+  since the two share its limits.
+- New commands, in both launchers: `ccc help`, `ccc list` (the picker's overview,
+  printed), `ccc login <n>` and `ccc logout <n>` (Claude Code's own
+  `claude auth login` / `logout` in that profile; `relogin` is an alias),
+  `ccc rename <n> <name>`, `ccc remove <n>` (off the list; the folder is kept),
+  and `ccc repair [n]`, which fixes a missing folder, history link or statusline
+  and lists, with the command to run, what only the user can do.
 - Automated cross-platform validation. `npm test` runs a dependency-free suite on
   Node's built-in test runner that executes the real `install.sh`, `bin/ccc`,
   `install.bat` and `bin/ccc.bat` against a throwaway `HOME` with a stub `claude`
@@ -78,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `ccc add` now ends by pointing at `ccc login <n>` to sign the account in.
+- Sign-in detection moved from `picker.mjs` into `profiles.cjs`, which the picker
+  and `ccc repair` share. `CCC_NO_KEYCHAIN=1` skips the Keychain lookup; the test
+  sandbox sets it, so no test can find a developer's real login.
 - **The statusline is self-contained.** `statusline.js` renders the account, model,
   git branch, working directory and context window usage itself, with nothing
   beyond Node, instead of running `claude-powerline` on every refresh. Every

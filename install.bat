@@ -73,8 +73,13 @@ echo   [ OK] Installed profiles.cjs
 :: Node parse it as ESM and the statusline would fail on every refresh.
 > "%PROFILES_DIR%\package.json" echo {"type": "commonjs"}
 
-:: ── Copy picker.mjs ─────────────────────────────────────────
+:: ── Copy picker.mjs, and usage.cjs which it reads live usage with ──
 echo   [INFO] Installing picker...
+copy /Y "%SCRIPT_DIR%src\usage.cjs" "%PROFILES_DIR%\usage.cjs" >nul
+if errorlevel 1 (
+    echo   [ERR] Could not install usage.cjs
+    exit /b 1
+)
 copy /Y "%SCRIPT_DIR%src\picker.mjs" "%PROFILES_DIR%\picker.mjs" >nul
 if errorlevel 1 (
     echo   [ERR] Could not install picker.mjs
