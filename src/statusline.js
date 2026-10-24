@@ -210,8 +210,28 @@ function isGptModel(id, opts) {
 }
 
 // A GPT model runs on the ChatGPT plan, so the Claude account's limits say
-// nothing about it; say which plan pays instead.
-const CHATGPT_PLAN_LABEL = `${DIM}Using ChatGPT plan${RESET}`;
+// nothing about it: say which plan pays, and how much of it is left as Codex
+// last reported it (ccc's router keeps that fresh while GPT models answer).
+// Figures more than half an hour old say how old they are.
+function chatgptLabel({ home = HOME, now = Date.now() } = {}) {
+  const cached = profiles.readJsonFile(join(home, ".claude-profiles", "chatgpt", "limits.json"));
+  const limits = cached.status === "ok" && cached.value.status === "ok" ? cached.value : null;
+  const windows = limits && Array.isArray(limits.windows) ? limits.windows.filter((w) => w && typeof w.left === "number") : [];
+  if (windows.length === 0) return `${DIM}Using ChatGPT plan${RESET}`;
+  const parts = windows.map((w) => {
+    const left = Math.round(Math.min(100, Math.max(0, w.left)));
+    const color = left >= 50 ? GREEN : left >= 20 ? AMBER : RED;
+    let text = `${DIM}${w.label}${RESET} ${fg(color)}${BOLD}${left}% left${RESET}`;
+    if (left < 20 && w.resetsAt) {
+      const when = usage.formatResetIn(w.resetsAt, now);
+      if (when) text += `${DIM}, resets ${when}${RESET}`;
+    }
+    return text;
+  });
+  const age = now - limits.fetchedAt;
+  const stale = age > 30 * 60 * 1000 ? `${DIM} (${usage.formatResetIn(now, limits.fetchedAt).replace(/^in /, "")} ago)${RESET}` : "";
+  return `${DIM}ChatGPT plan${RESET} ${parts.join(`${DIM} · ${RESET}`)}${stale}`;
+}
 
 // ── Rendering ────────────────────────────────────────────────
 
@@ -244,7 +264,7 @@ function render(session, configDir, { home = HOME, configPath = CONFIG_PATH, now
 
   const gpt = gptModel(data.model && data.model.id, { home });
   const context = contextLabel(data.context_window, gpt && gpt.window);
-  const limits = gpt ? CHATGPT_PLAN_LABEL : limitsLabel(data.rate_limits, now);
+  const limits = gpt ? chatgptLabel({ home, now }) : limitsLabel(data.rate_limits, now);
   return renderSegments(segments) + (context ? "  " + context : "") + (limits ? "  " + limits : "");
 }
 
@@ -276,6 +296,7 @@ module.exports = {
   limitsLabel,
   gptModel,
   isGptModel,
+  chatgptLabel,
   renderSegments,
   render,
   main,

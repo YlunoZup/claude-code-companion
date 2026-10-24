@@ -453,3 +453,42 @@ describe("GPT models", () => {
     }
   });
 });
+
+describe("the ChatGPT plan's usage", () => {
+  const limits = (sb, fetchedAt, windows) =>
+    sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), { status: "ok", planType: "pro", windows, fetchedAt });
+
+  test("a GPT model shows how much of the plan is left, as Codex last reported it", () => {
+    const sb = makeSandbox();
+    try {
+      const now = Date.now();
+      limits(sb, now - 60000, [{ label: "week", minutes: 10080, used: 4, left: 96, resetsAt: now + 5 * 86400000 }]);
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT plan week 96% left");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("under a fifth left it says when it resets; old figures say how old they are", () => {
+    const sb = makeSandbox();
+    try {
+      const now = Date.now();
+      limits(sb, now - 45 * 60000, [
+        { label: "5h", minutes: 300, used: 90, left: 10, resetsAt: now + 125 * 60000 },
+        { label: "week", minutes: 10080, used: 40, left: 60, resetsAt: now + 3 * 86400000 },
+      ]);
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT plan 5h 10% left, resets in 2h 5m · week 60% left (45m ago)");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("with no figures at all it just says which plan pays", () => {
+    const sb = makeSandbox();
+    try {
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home })), "Using ChatGPT plan");
+    } finally {
+      sb.cleanup();
+    }
+  });
+});

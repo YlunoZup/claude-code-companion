@@ -331,6 +331,37 @@ describe("the ChatGPT account (gpt)", () => {
     );
   });
 
+  // Claude Code leaves "stream" out of its own small requests, and Anthropic
+  // does not stream unless asked.
+  test("a request that does not ask for streaming gets JSON, stopped at its stop sequence", async () => {
+    const openai = await stub((req, body, res) =>
+      sse(res, [
+        { type: "response.created", response: {} },
+        { type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "<block>no</block> because" },
+        { type: "response.completed", response: { usage: { input_tokens: 5, output_tokens: 2 } } },
+      ])
+    );
+    try {
+      await withRouter(
+        "gpt",
+        async (port) => {
+          const body = messages("gpt-6.1-sol", { stop_sequences: ["</block>"], thinking: { type: "disabled" } });
+          delete body.stream;
+          const res = await call(port, { body, headers: { authorization: `Bearer ${KEY}` } });
+          assert.equal(res.status, 200);
+          assert.match(res.headers["content-type"], /application\/json/);
+          const message = JSON.parse(res.text);
+          assert.deepEqual(message.content, [{ type: "text", text: "<block>no" }]);
+          assert.equal(message.stop_reason, "stop_sequence");
+          assert.equal(message.stop_sequence, "</block>");
+        },
+        { openai }
+      );
+    } finally {
+      await openai.close();
+    }
+  });
+
   test("a request that asks for no streaming gets the whole message as JSON", async () => {
     await withRouter(
       "gpt",
@@ -459,6 +490,84 @@ describe("when OpenAI says no", () => {
           const ev = events(res.text);
           assert.equal(ev[ev.length - 1].event, "error");
           assert.match(ev[ev.length - 1].data.error.message, /stopped before it was complete/);
+        },
+        { openai }
+      );
+    } finally {
+      await openai.close();
+    }
+  });
+
+  // OpenAI opens the stream before it checks the input's length; the router
+  // holds the reply back until the answer starts, so Claude Code still gets the
+  // HTTP 400 that makes it compact the conversation and try again.
+  test("a context overflow reported inside the stream comes back as an HTTP 400 'prompt is too long'", async () => {
+    const overflow = { type: "invalid_request_error", code: "context_length_exceeded", message: "Your input exceeds the context window of this model.", param: "input" };
+    const openai = await stub((req, body, res) =>
+      sse(res, [
+        { type: "response.created", response: {} },
+        { type: "response.in_progress", response: {} },
+        { type: "response.metadata", metadata: {} },
+        { type: "error", error: overflow },
+        { type: "response.failed", response: { error: overflow, usage: null } },
+      ])
+    );
+    try {
+      await withRouter(
+        "gpt",
+        async (port) => {
+          const res = await call(port, { body: messages("gpt-6.1-sol"), headers: { authorization: `Bearer ${KEY}` } });
+          assert.equal(res.status, 400);
+          assert.equal(res.headers["x-should-retry"], "false");
+          const err = JSON.parse(res.text);
+          assert.equal(err.error.type, "invalid_request_error");
+          assert.match(err.error.message, /^prompt is too long: Your input exceeds the context window/);
+        },
+        { openai }
+      );
+    } finally {
+      await openai.close();
+    }
+  });
+
+  test("a usage limit reported inside the stream comes back as a 429 that is not retried", async () => {
+    const limit = { code: "subscription_sharing_usage_limit_exceeded", message: "limit" };
+    const openai = await stub((req, body, res) => sse(res, [{ type: "response.created", response: {} }, { type: "response.failed", response: { error: limit } }]));
+    try {
+      await withRouter(
+        "gpt",
+        async (port) => {
+          const res = await call(port, { body: messages("gpt-6.1-sol"), headers: { authorization: `Bearer ${KEY}` } });
+          assert.equal(res.status, 429);
+          assert.equal(res.headers["x-should-retry"], "false");
+          assert.match(JSON.parse(res.text).error.message, /chatgpt\.com\/settings\/usage/);
+        },
+        { openai }
+      );
+    } finally {
+      await openai.close();
+    }
+  });
+
+  // Auto mode's safety check runs on Anthropic's servers; turned down as an
+  // unsupported beta, Claude Code vets each tool call itself instead.
+  test("auto mode's server-side check is turned down as an unsupported beta, naming it", async () => {
+    const openai = await stub((req, body, res) => sse(res, TEXT_ANSWER));
+    try {
+      await withRouter(
+        "gpt",
+        async (port) => {
+          const res = await call(port, {
+            body: messages("gpt-6.1-sol", { safeguards: [{ type: "dangerous_tool_use" }] }),
+            headers: { authorization: `Bearer ${KEY}`, "anthropic-beta": "claude-code-20250219,dangerous-tool-use-2026-09-03" },
+          });
+          assert.equal(res.status, 400);
+          const err = JSON.parse(res.text).error;
+          assert.equal(err.type, "invalid_request_error");
+          assert.match(err.message, /dangerous-tool-use-2026-09-03/);
+          assert.match(err.message, /dangerous_tool_use/);
+          assert.match(err.message, /safeguard/);
+          assert.equal(openai.requests.length, 0, "nothing reaches OpenAI");
         },
         { openai }
       );

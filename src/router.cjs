@@ -46,6 +46,22 @@ const ROUTER_KEY_HEADER = "x-ccc-router-key";
 // Claude Code gives up on a stream that sends nothing for a while, and a GPT
 // model can reason for minutes before its first word, so the router pings.
 const PING_MS = 10000;
+
+// How long a reply is held back waiting for the model to start, so that a
+// refusal can still go back as an HTTP error (see streamBack).
+const HOLD_MS = 15000;
+
+// The HTTP status of each Anthropic error type.
+const STATUS_FOR = {
+  invalid_request_error: 400,
+  authentication_error: 401,
+  permission_error: 403,
+  not_found_error: 404,
+  request_too_large: 413,
+  rate_limit_error: 429,
+  api_error: 500,
+  overloaded_error: 529,
+};
 const LOG_MAX_BYTES = 1024 * 1024;
 
 const HOP_BY_HOP = new Set([
@@ -178,8 +194,10 @@ function modelResolver(models, mode) {
 //   opts.upstream  where Claude requests go, normally api.anthropic.com
 //   opts.models    the GPT models, as chatgpt.listModels gives them
 //   opts.getToken  async ({force}) => ChatGPT access token
+//   opts.onAnswer  called after each GPT answer; launch() uses it to keep the
+//                  plan's usage figures fresh
 function createRouter(opts) {
-  const { mode, key, models = [], log = () => {} } = opts;
+  const { mode, key, models = [], log = () => {}, onAnswer = () => {} } = opts;
   const upstream = new URL(opts.upstream || DEFAULT_UPSTREAM);
   const openaiBase = (opts.openaiBase || chatgpt.API_BASE).replace(/\/+$/, "");
   const getToken = opts.getToken || ((o) => chatgpt.getAccessToken({ home: opts.home, ...o }));
@@ -297,11 +315,25 @@ function createRouter(opts) {
       sendJson(res, 200, { input_tokens: translate.estimateTokens(body) });
       return;
     }
+    // Auto mode asks Anthropic's servers to vet the model's tool calls (the
+    // safeguards field), which no other model's server can do. Turned down
+    // as an unsupported beta, Claude Code drops it for the session and vets
+    // each call itself, with requests of its own that come through here.
+    if (body.safeguards) {
+      const beta = String(req.headers["anthropic-beta"] || "")
+        .split(",")
+        .map((b) => b.trim())
+        .find((b) => b.startsWith("dangerous-tool-use"));
+      sendError(res, 400, "invalid_request_error", `safeguards: dangerous_tool_use is not supported on GPT models (anthropic-beta: ${beta || "dangerous-tool-use"})`);
+      return;
+    }
     const started = Date.now();
     const requested = String(body.model || "");
     const model = resolver.resolve(requested);
     const info = resolver.info(model);
-    const wantsStream = body.stream !== false;
+    // Anthropic streams only when asked to; Claude Code leaves the field out
+    // for its own small requests, auto mode's safety check among them.
+    const wantsStream = body.stream === true;
     const signal = { onAbort: null };
     let aborted = false;
     res.on("close", () => {
@@ -358,28 +390,65 @@ function createRouter(opts) {
         return fail(mapped.status, mapped.error.type, mapped.error.message, mapped.retry, { upstream: upRes.statusCode, code: mapped.code || undefined, request_id: upRes.headers["x-request-id"] });
       }
 
-      return streamBack(upRes, res, { model: requested || model, names, wantsStream, started, requestId: upRes.headers["x-request-id"] });
+      return streamBack(upRes, res, {
+        cancelled: () => aborted,
+        effort: request.reasoning && request.reasoning.effort,
+        model: requested || model,
+        names,
+        wantsStream,
+        thinking: translate.wantsThinking(body),
+        stops: Array.isArray(body.stop_sequences) ? body.stop_sequences.filter((s) => typeof s === "string" && s) : [],
+        started,
+        requestId: upRes.headers["x-request-id"],
+      });
     }
     return fail(400, "invalid_request_error", "ChatGPT: the request was refused repeatedly", false);
   }
 
-  function streamBack(upRes, res, { model, names, wantsStream, started, requestId }) {
+  // The answer, streamed back as it comes — but only once the model starts
+  // answering. OpenAI reports a refusal such as a context overflow after its
+  // stream has opened; held back until then, it can still reach Claude Code as
+  // the HTTP error Anthropic would give, and "prompt is too long" is what makes
+  // Claude Code compact the conversation and try again. A model slow to start
+  // gets the stream opened anyway after a while, so the pings keep it alive.
+  function streamBack(upRes, res, { cancelled = () => false, effort, model, names, wantsStream, thinking, stops, started, requestId }) {
     let lastWrite = Date.now();
-    const write = (event, data) => {
-      if (!wantsStream || res.writableEnded) return;
+    let opened = false;
+    const held = [];
+    const send = (event, data) => {
+      if (res.writableEnded) return;
       res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
       lastWrite = Date.now();
     };
-    if (wantsStream) {
+    const open = () => {
+      if (opened || !wantsStream || res.writableEnded) return;
+      opened = true;
       res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", ...(requestId ? { "request-id": String(requestId) } : {}) });
-    }
-    const translator = new translate.StreamTranslator({ model, names, emit: write });
+      for (const [event, data] of held.splice(0)) send(event, data);
+    };
+    const write = (event, data) => {
+      if (!wantsStream) return;
+      if (opened) {
+        send(event, data);
+        return;
+      }
+      // A failure before the answer starts goes back as an HTTP error instead.
+      if (event === "error") return;
+      held.push([event, data]);
+      if (event !== "message_start") open();
+    };
+    const translator = new translate.StreamTranslator({ model, names, emit: write, thinking, stops });
     translator.start();
+    const openAnyway = setTimeout(open, HOLD_MS);
     const ping = setInterval(() => {
-      if (Date.now() - lastWrite >= PING_MS) write("ping", { type: "ping" });
+      if (opened && Date.now() - lastWrite >= PING_MS) send("ping", { type: "ping" });
     }, PING_MS / 2);
 
-    const parse = sseParser((event) => translator.handle(event));
+    // A stop sequence ends the answer here, so stop OpenAI generating the rest.
+    const parse = sseParser((event) => {
+      translator.handle(event);
+      if (translator.done && translator.message.stop_reason === "stop_sequence") upRes.destroy();
+    });
     upRes.setEncoding("utf8");
     upRes.on("data", parse);
     let finished = false;
@@ -387,22 +456,37 @@ function createRouter(opts) {
       if (finished) return;
       finished = true;
       clearInterval(ping);
+      clearTimeout(openAnyway);
+      // Claude Code hung up — Esc, or a quit — so there is nobody to answer.
+      if (cancelled()) {
+        log({ route: "openai", model, status: "cancelled", ms: Date.now() - started, request_id: requestId });
+        return;
+      }
       if (!translator.done) translator.fail({ type: "api_error", message: "ChatGPT: the answer stopped before it was complete" });
       log({
         route: "openai",
         model,
-        status: translator.error ? `stream-error ${translator.error.type}` : 200,
+        effort,
+        status: translator.error ? `${opened ? "stream-error" : "error"} ${translator.error.type}` : 200,
         ms: Date.now() - started,
         request_id: requestId,
         usage: translator.error ? undefined : translator.message.usage,
       });
-      if (wantsStream) {
+      if (!translator.error) {
+        try {
+          onAnswer();
+        } catch {}
+      }
+      if (opened) {
         res.end();
         return;
       }
       if (translator.error) {
-        const status = translator.error.type === "rate_limit_error" ? 429 : translator.error.type === "overloaded_error" ? 529 : translator.error.type === "invalid_request_error" ? 400 : 500;
+        const status = STATUS_FOR[translator.error.type] || 500;
         sendError(res, status, translator.error.type, translator.error.message, status >= 500);
+      } else if (wantsStream) {
+        open();
+        res.end();
       } else {
         sendJson(res, 200, translator.message);
       }
@@ -704,6 +788,19 @@ async function launch({ mode, args = [], env = process.env, home, claude = "clau
     return 1;
   }
 
+  // The plan's usage figures, which the picker and statusline show, come from
+  // Codex. Ask once now and again after answers, at most every couple of
+  // minutes, without ever holding a request up.
+  let asking = null;
+  const refreshLimits = () => {
+    if (asking || env.CCC_NO_USAGE) return;
+    asking = chatgpt
+      .planLimits({ home, env })
+      .catch(() => {})
+      .finally(() => (asking = null));
+  };
+  if (signedIn.signedIn) refreshLimits();
+
   const key = crypto.randomBytes(24).toString("hex");
   const router = createRouter({
     mode,
@@ -712,6 +809,7 @@ async function launch({ mode, args = [], env = process.env, home, claude = "clau
     home,
     upstream: mode === "mixed" && env.ANTHROPIC_BASE_URL ? env.ANTHROPIC_BASE_URL : DEFAULT_UPSTREAM,
     log: makeLog(p.log),
+    onAnswer: refreshLimits,
   });
   const port = await router.listen();
 

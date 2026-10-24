@@ -562,3 +562,62 @@ test("token counts are estimated from the size of the request", () => {
   const n = estimateTokens({ system: "x".repeat(400), messages: [], tools: [] });
   assert.ok(n > 90 && n < 130, `got ${n}`);
 });
+
+describe("Claude Code's own small requests", () => {
+  const usage = { input_tokens: 10, output_tokens: 3 };
+
+  // Anthropic sends no thinking blocks to a request that asked for none, and
+  // auto mode's safety check reads the first block as its verdict.
+  test("with thinking off, reasoning is left out of the answer", () => {
+    const events = [
+      { type: "response.output_item.added", output_index: 0, item: { type: "reasoning", id: "rs_1" } },
+      { type: "response.reasoning_summary_text.delta", output_index: 0, delta: "hm" },
+      { type: "response.output_item.done", output_index: 0, item: { type: "reasoning", id: "rs_1", encrypted_content: "E" } },
+      { type: "response.output_text.delta", output_index: 1, content_index: 0, delta: "<block>no</block>" },
+      { type: "response.completed", response: { usage } },
+    ];
+    const emitted = [];
+    const t = new StreamTranslator({ model: "gpt-x", emit: (e, d) => emitted.push(d), thinking: false });
+    t.start();
+    for (const e of events) t.handle(e);
+    assert.deepEqual(t.message.content, [{ type: "text", text: "<block>no</block>" }]);
+    assert.equal(translate.wantsThinking({ thinking: { type: "disabled" } }), false);
+    assert.equal(translate.wantsThinking({}), false);
+    assert.equal(translate.wantsThinking({ thinking: { type: "adaptive" } }), true);
+  });
+
+  // OpenAI has no stop sequences; the translator ends the text where
+  // Anthropic would, even when the sequence straddles two deltas.
+  test("a stop sequence ends the answer just before it", () => {
+    const emitted = [];
+    const t = new StreamTranslator({ model: "gpt-x", emit: (e, d) => emitted.push({ e, d }), stops: ["</block>"] });
+    t.start();
+    for (const delta of ["<block>ye", "s</bl", "ock>\n<reason>never sent</reason>"]) t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta });
+    t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "more" });
+    assert.deepEqual(t.message.content, [{ type: "text", text: "<block>yes" }]);
+    assert.equal(t.message.stop_reason, "stop_sequence");
+    assert.equal(t.message.stop_sequence, "</block>");
+    const delta = emitted.find((x) => x.e === "message_delta").d.delta;
+    assert.deepEqual(delta, { stop_reason: "stop_sequence", stop_sequence: "</block>" });
+    assert.ok(t.done);
+  });
+
+  test("without stop sequences text passes untouched", () => {
+    const t = new StreamTranslator({ model: "gpt-x" });
+    t.start();
+    t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "a</block>b" });
+    t.handle({ type: "response.completed", response: { usage } });
+    assert.equal(t.message.content[0].text, "a</block>b");
+  });
+});
+
+test("text held back as a possible stop sequence is sent when it turns out not to be one", () => {
+  const t = new StreamTranslator({ model: "gpt-x", stops: ["</block>"] });
+  t.start();
+  t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "a </bl" });
+  t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: "ue sky" });
+  t.handle({ type: "response.output_text.delta", output_index: 0, content_index: 0, delta: " </" });
+  t.handle({ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } });
+  assert.equal(t.message.content[0].text, "a </blue sky </");
+  assert.equal(t.message.stop_reason, "end_turn");
+});

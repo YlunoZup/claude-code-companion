@@ -475,3 +475,24 @@ describe("the ChatGPT account", () => {
     }
   });
 });
+
+test("the ChatGPT account shows the plan's usage as Codex last reported it", () => {
+  const sb = makeSandbox();
+  try {
+    sb.writeJson(sb.configPath, { accounts: { 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+    sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), { client_id: "c", account: { email: "me@example.com" }, access_token: "a", refresh_token: "r", plan_usage: true, expires_at: Date.now() + 3600000 });
+    // The sandbox has no Codex to ask, so the last answer stands in.
+    sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), {
+      status: "ok",
+      planType: "pro",
+      windows: [{ label: "week", minutes: 10080, used: 4, left: 96, resetsAt: Date.now() + 5 * 86400000 + 3600000 }],
+      fetchedAt: Date.now() - 20 * 60000,
+    });
+    const ui = stripAnsi(sb.node("src/picker.mjs", ["--list"]).stdout);
+    assert.match(ui, /me@example\.com\s+·\s+ChatGPT Pro/);
+    assert.match(ui, /week\s+█+░*\s+96% left · resets in 5d/);
+    assert.match(ui, /as Codex reported 2[01]m ago/);
+  } finally {
+    sb.cleanup();
+  }
+});

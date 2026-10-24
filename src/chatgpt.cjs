@@ -63,6 +63,7 @@ function paths(home) {
     auth: path.join(dir, "auth.json"),
     lock: path.join(dir, "auth.lock"),
     models: path.join(dir, "models.json"),
+    limits: path.join(dir, "limits.json"),
     sessions: path.join(dir, "sessions"),
     log: path.join(dir, "router.log"),
   };
@@ -213,13 +214,16 @@ function status({ home } = {}) {
   const auth = readJson(p.auth);
   const signedIn = Boolean(auth && auth.refresh_token);
   const account = (auth && auth.account) || {};
+  // OpenAI's sign-in does not say which plan it is; Codex's last answer does.
+  const limits = readJson(p.limits);
+  const plan = account.plan || (limits && limits.status === "ok" && limits.planType) || null;
   return {
     signedIn,
     planUsage: Boolean(signedIn && auth.plan_usage),
     email: account.email || null,
     name: account.name || null,
-    plan: account.plan || null,
-    planLabel: planLabel(account.plan),
+    plan,
+    planLabel: planLabel(plan),
     clientId: (auth && auth.client_id) || null,
     expiresAt: (auth && auth.expires_at) || null,
   };
@@ -380,6 +384,186 @@ async function listModels({ home, maxAgeMs = MODELS_MAX_AGE_MS, timeoutMs = 8000
     }
   } catch {}
   return cached && Array.isArray(cached.models) ? cached.models : [];
+}
+
+// ── Plan limits ──────────────────────────────────────────────
+//
+// OpenAI tells a tool on this route nothing about how much of the plan is
+// left. Codex can: its app-server reports the plan's limits for the Codex
+// sign-in, and requests made here count against the same allowance. So ccc
+// asks a Codex that is already installed — the CLI, the IDE extension or the
+// desktop app — and Codex answers with its own login, which ccc never reads.
+// CCC_CODEX_BIN names a Codex to use; "none" turns this off.
+
+const LIMITS_FRESH_MS = 2 * 60 * 1000;
+
+function versionOf(dir) {
+  const m = /-(\d+(?:\.\d+)*)-/.exec(path.basename(dir));
+  return m ? m[1].split(".").map(Number) : [];
+}
+
+function newerFirst(a, b) {
+  const va = versionOf(a);
+  const vb = versionOf(b);
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (vb[i] || 0) - (va[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+// The Codex executable to ask, or null.
+function findCodex({ env = process.env, home = os.homedir(), platform = process.platform } = {}) {
+  if (env.CCC_CODEX_BIN) return env.CCC_CODEX_BIN === "none" ? null : fs.existsSync(env.CCC_CODEX_BIN) ? env.CCC_CODEX_BIN : null;
+  const exe = platform === "win32" ? "codex.exe" : "codex";
+  for (const dir of String(env.PATH || "").split(path.delimiter).filter(Boolean)) {
+    const candidate = path.join(dir, exe);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  // The IDE extension ships its own, one folder per version.
+  for (const editor of [".vscode", ".vscode-insiders", ".cursor", ".windsurf"]) {
+    const extensions = path.join(home, editor, "extensions");
+    let dirs = [];
+    try {
+      dirs = fs.readdirSync(extensions).filter((d) => d.startsWith("openai.chatgpt-")).map((d) => path.join(extensions, d));
+    } catch {
+      continue;
+    }
+    for (const dir of dirs.sort(newerFirst)) {
+      let arches = [];
+      try {
+        arches = fs.readdirSync(path.join(dir, "bin"));
+      } catch {}
+      for (const arch of arches) {
+        const candidate = path.join(dir, "bin", arch, exe);
+        if (fs.existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  const app = "/Applications/Codex.app/Contents/Resources/codex";
+  if (platform === "darwin" && fs.existsSync(app)) return app;
+  return null;
+}
+
+// "in 4h 2m", "in 2d 6h" — as usage.cjs words a Claude limit's reset.
+function formatReset(resetsAt, now = Date.now()) {
+  return require("./usage.cjs").formatResetIn(resetsAt, now);
+}
+
+function windowLabel(minutes) {
+  if (minutes === 300) return "5h";
+  if (minutes === 10080) return "week";
+  if (minutes && minutes % 1440 === 0) return `${minutes / 1440}d`;
+  if (minutes && minutes % 60 === 0) return `${minutes / 60}h`;
+  return minutes ? `${minutes}m` : "limit";
+}
+
+// Codex's account/rateLimits/read answer as
+//   { status: "ok", planType, windows: [{ label, minutes, used, left, resetsAt }],
+//     credits, resetCredits, reached, fetchedAt }
+// windows shortest first; resetsAt in epoch ms.
+function parsePlanLimits(result, fetchedAt = Date.now()) {
+  const limits = result && (result.rateLimits || (result.rateLimitsByLimitId && result.rateLimitsByLimitId.codex));
+  if (!limits || typeof limits !== "object") return { status: "unavailable" };
+  const windows = [];
+  for (const w of [limits.primary, limits.secondary]) {
+    if (!w || typeof w.usedPercent !== "number") continue;
+    const used = Math.min(100, Math.max(0, w.usedPercent));
+    const minutes = Number(w.windowDurationMins) || null;
+    windows.push({ label: windowLabel(minutes), minutes, used, left: 100 - used, resetsAt: w.resetsAt ? w.resetsAt * 1000 : null });
+  }
+  windows.sort((a, b) => (a.minutes || 0) - (b.minutes || 0));
+  const reset = result.rateLimitResetCredits;
+  return {
+    status: "ok",
+    planType: limits.planType || null,
+    windows,
+    credits: limits.credits || null,
+    resetCredits: (reset && reset.availableCount) || 0,
+    reached: limits.rateLimitReachedType || null,
+    fetchedAt,
+  };
+}
+
+// Ask Codex. Never rejects: a failure is { status: "error", error }.
+function askCodex({ command, args = ["app-server"], timeoutMs = 10000, env = process.env } = {}) {
+  return new Promise((resolve) => {
+    if (!command) {
+      resolve({ status: "unavailable", error: "no Codex installed" });
+      return;
+    }
+    let child;
+    try {
+      child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"], env, windowsHide: true });
+    } catch (err) {
+      resolve({ status: "error", error: err.message });
+      return;
+    }
+    let settled = false;
+    let buffered = "";
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child.kill();
+      } catch {}
+      resolve(result);
+    };
+    const timer = setTimeout(() => finish({ status: "error", error: "Codex did not answer" }), timeoutMs);
+    const send = (message) => {
+      try {
+        child.stdin.write(JSON.stringify(message) + "\n");
+      } catch {}
+    };
+    child.on("error", (err) => finish({ status: "error", error: err.message }));
+    child.on("close", () => finish({ status: "error", error: "Codex exited without answering" }));
+    child.stdin.on("error", () => {});
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      buffered += chunk;
+      let newline;
+      while ((newline = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, newline);
+        buffered = buffered.slice(newline + 1);
+        let message;
+        try {
+          message = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (message.id === 1) {
+          send({ method: "initialized" });
+          send({ method: "account/rateLimits/read", id: 2 });
+        } else if (message.id === 2) {
+          finish(message.result ? parsePlanLimits(message.result) : { status: "error", error: (message.error && message.error.message) || "Codex refused" });
+        }
+      }
+    });
+    send({ method: "initialize", id: 1, params: { clientInfo: { name: "ccc", title: "claude-multi-account", version: "0.1.0" } } });
+  });
+}
+
+// The plan's limits: from cache when it is recent, else asked of Codex now and
+// cached. Falls back to the last answer there is, marked by its fetchedAt.
+async function planLimits({ home, maxAgeMs = LIMITS_FRESH_MS, env = process.env, timeoutMs } = {}) {
+  const p = paths(home);
+  const cached = readJson(p.limits);
+  if (cached && cached.status === "ok" && Date.now() - cached.fetchedAt < maxAgeMs) return cached;
+  const fresh = await askCodex({ command: findCodex({ env, home: home || os.homedir() }), env, timeoutMs });
+  if (fresh.status === "ok") {
+    try {
+      writePrivate(p.limits, fresh);
+    } catch {}
+    return fresh;
+  }
+  return cached && cached.status === "ok" ? cached : fresh;
+}
+
+// The cached answer alone, for the statusline, which must not wait on Codex.
+function cachedPlanLimits({ home } = {}) {
+  const cached = readJson(paths(home).limits);
+  return cached && cached.status === "ok" ? cached : null;
 }
 
 // Whether a model id is one of the GPT models, by the cached list or its name.
@@ -676,8 +860,17 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
         say("ChatGPT: not signed in. Run: ccc gpt login");
         return 1;
       }
-      say(`ChatGPT: signed in as ${s.email || "(unknown)"} · ${s.planLabel}`);
+      const limits = await planLimits({ maxAgeMs: 0 });
+      const now = Date.now();
+      say(`ChatGPT: signed in as ${s.email || "(unknown)"} · ${planLabel(s.plan || (limits.status === "ok" && limits.planType))}`);
       say(s.planUsage ? `Plan usage: on — GPT requests count against your plan. Manage usage: ${USAGE_URL}` : "Plan usage: not allowed — run ccc gpt login and allow it");
+      if (limits.status === "ok" && limits.windows.length) {
+        const parts = limits.windows.map((w) => `${w.label} ${Math.round(w.left)}% left${w.resetsAt ? ` (resets ${formatReset(w.resetsAt, now)})` : ""}`);
+        const age = now - limits.fetchedAt > LIMITS_FRESH_MS ? `, as of ${Math.round((now - limits.fetchedAt) / 60000)} min ago` : "";
+        say(`Usage left: ${parts.join(" · ")}${age} — the whole plan, as Codex reports it`);
+      } else {
+        say(`Usage left: ${limits.status === "unavailable" ? "needs Codex installed and signed in to report it" : `Codex could not report it (${limits.error})`}; see ${USAGE_URL}`);
+      }
       const models = await listModels();
       if (models.length) say(`Models: ${models.map((m) => `${m.name} (${m.id})`).join(", ")}`);
       return 0;
@@ -744,6 +937,12 @@ module.exports = {
   getAccessToken,
   normaliseModels,
   listModels,
+  findCodex,
+  windowLabel,
+  parsePlanLimits,
+  askCodex,
+  planLimits,
+  cachedPlanLimits,
   isGptModelId,
   login,
   logout,

@@ -131,16 +131,24 @@ const log = (msg = "") => write(msg + "\n");
 // two to give. A slot sharing another's login reuses that answer.
 async function loadUsage(accounts) {
   if (process.env.CCC_NO_USAGE) return;
-  // The ChatGPT account's limits are ChatGPT's, which only ChatGPT shows.
+  // The ChatGPT account's limits are the ChatGPT plan's, which Codex reports.
   const asking = accounts.filter((a) => a.ready && !a.sameAs && !a.gptAccount);
-  if (asking.length === 0) return;
+  const chatgptAccounts = accounts.filter((a) => a.ready && a.gptAccount);
+  if (asking.length === 0 && chatgptAccounts.length === 0) return;
 
   // The progress line always goes to stderr, so `ccc list > file` stays clean.
   const tty = process.stderr.isTTY;
   process.stderr.write(`  ${c.dim}Checking live usage…${c.reset}${tty ? "" : "\n"}`);
 
-  const answers = await Promise.all(asking.map((a) => usage.fetchUsage(a.configDir ? a.dir : null)));
+  const [answers, plan] = await Promise.all([
+    Promise.all(asking.map((a) => usage.fetchUsage(a.configDir ? a.dir : null))),
+    chatgptAccounts.length ? chatgpt.planLimits({ maxAgeMs: 0 }) : null,
+  ]);
   asking.forEach((a, i) => (a.usage = answers[i]));
+  for (const acc of chatgptAccounts) {
+    acc.planLimits = plan;
+    if (plan && plan.status === "ok" && plan.planType) acc.planLabel = chatgpt.planLabel(plan.planType);
+  }
   for (const acc of accounts) {
     if (acc.sameAs) acc.usage = accounts.find((a) => a.key === acc.sameAs).usage;
   }
@@ -215,10 +223,19 @@ function render(accounts, now = Date.now()) {
       boxRow(`         ${planStr}`);
     }
 
-    // The ChatGPT account: GPT models, on the ChatGPT plan's own limits.
+    // The ChatGPT account: GPT models, on the ChatGPT plan's own limits, as
+    // Codex reports them. Figures that could not be refreshed say how old
+    // they are; with none at all, the settings page is where they are.
     if (acc.gptAccount) {
       boxRow(`         ${c.dim}GPT models in Claude Code, on your ChatGPT plan${c.reset}`);
-      if (acc.ready) boxRow(`         ${c.dim}usage: chatgpt.com/settings/usage${c.reset}`);
+      const plan = acc.planLimits;
+      if (plan && plan.status === "ok" && plan.windows.length) {
+        for (const w of plan.windows) boxRow(`         ${usageRow(w.label, w, now)}`);
+        const age = now - plan.fetchedAt;
+        if (age > 5 * 60 * 1000) boxRow(`         ${c.dim}as Codex reported ${usage.formatResetIn(now, plan.fetchedAt).replace(/^in /, "")} ago${c.reset}`);
+      } else if (acc.ready) {
+        boxRow(`         ${c.dim}usage: chatgpt.com/settings/usage${c.reset}`);
+      }
       boxRow(blank);
       continue;
     }

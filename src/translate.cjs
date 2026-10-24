@@ -386,6 +386,12 @@ function toResponsesRequest(body, opts) {
 
 // OpenAI counts cached and cache-written tokens inside input_tokens; Anthropic
 // counts them apart, which is how Claude Code adds them up.
+// Whether a Messages request asked for thinking, as Anthropic decides it.
+function wantsThinking(body) {
+  const thinking = body && body.thinking;
+  return Boolean(thinking && typeof thinking === "object" && thinking.type && thinking.type !== "disabled");
+}
+
 function toUsage(usage) {
   const u = usage || {};
   const details = u.input_tokens_details || {};
@@ -403,9 +409,18 @@ function toUsage(usage) {
 //
 // emit(event, data) receives each Messages event. The finished message is kept
 // as well, for a caller that asked for no streaming.
+//   thinking  whether the request asked for thinking. Anthropic sends no
+//             thinking blocks when it did not, and some of Claude Code's own
+//             requests — auto mode's safety check among them — read the first
+//             block of the answer as its text.
+//   stops     the request's stop sequences, which OpenAI has no field for: the
+//             text ends just before the first one, and the answer stops
+//             there, as Anthropic's would
 class StreamTranslator {
-  constructor({ model, names, messageId, emit }) {
+  constructor({ model, names, messageId, emit, thinking = true, stops = [] }) {
     this.model = model;
+    this.thinking = thinking;
+    this.stops = stops;
     this.names = names || { original: (n) => n };
     this.emit = emit || (() => {});
     this.message = {
@@ -455,6 +470,12 @@ class StreamTranslator {
   closeBlock(key) {
     const state = this.open.get(key);
     if (!state) return;
+    // Text held back as a possible stop sequence turned out not to be one.
+    if (state.held) {
+      const held = state.held;
+      state.held = "";
+      this.delta(key, { type: "text_delta", text: held });
+    }
     if (state.kind === "tool_use" || state.kind === "server_tool_use") {
       let input = {};
       try {
@@ -470,16 +491,17 @@ class StreamTranslator {
     for (const key of [...this.open.keys()]) this.closeBlock(key);
   }
 
-  finish(stopReason, usage) {
+  finish(stopReason, usage, stopSequence = null) {
     if (this.done) return;
     this.start();
     this.closeAll();
     this.done = true;
     this.message.stop_reason = stopReason;
+    this.message.stop_sequence = stopSequence;
     this.message.usage = toUsage(usage);
     this.emit("message_delta", {
       type: "message_delta",
-      delta: { stop_reason: stopReason, stop_sequence: null },
+      delta: { stop_reason: stopReason, stop_sequence: stopSequence },
       usage: this.message.usage,
     });
     this.emit("message_stop", { type: "message_stop" });
@@ -490,6 +512,47 @@ class StreamTranslator {
     this.done = true;
     this.error = error;
     this.emit("error", { type: "error", error: { type: error.type, message: error.message } });
+  }
+
+  // Text as it arrives, cut short at a stop sequence. A sequence can straddle
+  // two deltas, so text that could be the start of one is held back until the
+  // next delta settles it.
+  textDelta(key, text) {
+    if (!this.stops.length) {
+      this.delta(key, { type: "text_delta", text });
+      return;
+    }
+    const state = this.open.get(key);
+    const sent = this.message.content[state.index].text;
+    const all = sent + (state.held || "") + text;
+    let cut = -1;
+    let hit = null;
+    for (const stop of this.stops) {
+      const at = all.indexOf(stop);
+      if (at >= 0 && (cut < 0 || at < cut)) {
+        cut = at;
+        hit = stop;
+      }
+    }
+    if (hit !== null) {
+      state.held = "";
+      const keep = all.slice(sent.length, cut);
+      if (keep) this.delta(key, { type: "text_delta", text: keep });
+      this.finish("stop_sequence", null, hit);
+      return;
+    }
+    let hold = 0;
+    for (const stop of this.stops) {
+      for (let n = Math.min(stop.length - 1, all.length - sent.length); n > hold; n--) {
+        if (stop.startsWith(all.slice(all.length - n))) {
+          hold = n;
+          break;
+        }
+      }
+    }
+    state.held = all.slice(all.length - hold);
+    const ready = all.slice(sent.length, all.length - hold);
+    if (ready) this.delta(key, { type: "text_delta", text: ready });
   }
 
   // A search OpenAI ran, as the pair of blocks Anthropic's web search gives:
@@ -534,6 +597,7 @@ class StreamTranslator {
 
       case "response.output_item.added":
         this.start();
+        if (item.type === "reasoning" && !this.thinking) return;
         if (item.type === "reasoning") {
           this.openBlock(at("reasoning"), { type: "thinking", thinking: "", signature: "" });
         } else if (item.type === "function_call") {
@@ -569,7 +633,7 @@ class StreamTranslator {
           this.start();
           this.openBlock(key, { type: "text", text: "" });
         }
-        if (event.delta) this.delta(key, { type: "text_delta", text: event.delta });
+        if (event.delta) this.textDelta(key, event.delta);
         return;
       }
 
@@ -587,6 +651,7 @@ class StreamTranslator {
       }
 
       case "response.output_item.done":
+        if (item.type === "reasoning" && !this.thinking) return;
         if (item.type === "reasoning") {
           const key = at("reasoning");
           if (!this.open.has(key)) this.openBlock(key, { type: "thinking", thinking: "", signature: "" });
@@ -719,6 +784,7 @@ module.exports = {
   toInstructions,
   cacheKeyFor,
   toResponsesRequest,
+  wantsThinking,
   toUsage,
   StreamTranslator,
   toAnthropicError,

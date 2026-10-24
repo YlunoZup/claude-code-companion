@@ -39,6 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `Using ChatGPT plan` on a GPT model instead of the Claude account's limits.
     OpenAI reports no usage figures on this route; the picker points at
     chatgpt.com/settings/usage.
+  - The ChatGPT plan's usage left (weekly, and 5-hour where the plan has one)
+    shows in the picker, `ccc gpt status` and the statusline. OpenAI gives
+    none on this route, so ccc asks the installed Codex (CLI, IDE extension or
+    app) through its own app-server and caches the answer; the router keeps
+    it fresh after GPT answers.
+  - Auto mode works on GPT models: the router turns down Anthropic's
+    server-side safety field as an unsupported beta, so Claude Code vets tool
+    calls with its own classifier requests, which GPT answers. Requests that
+    leave out `stream` get JSON, as from Anthropic, and stop sequences are
+    honoured. A context overflow reported inside OpenAI's stream comes back
+    as HTTP 400 "prompt is too long", so Claude Code compacts and retries.
   - An account whose saved default model is a GPT model starts with the GPT
     models by itself, and `ccc repair` flags one on the default profile, which
     plain `claude` cannot run.

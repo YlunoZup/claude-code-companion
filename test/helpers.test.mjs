@@ -66,6 +66,8 @@ export function makeSandbox(opts = {}) {
     // The default profile's Keychain service name does not depend on HOME, so
     // without this a test on a Mac would find the developer's real login.
     CCC_NO_KEYCHAIN: "1",
+    // Nothing may ask a real Codex for a real account's ChatGPT limits.
+    CCC_CODEX_BIN: "none",
     // Test files run in parallel, so spawning git from the statusline can take
     // longer than the production default. Without this the statusline tests
     // are flaky under load rather than wrong.

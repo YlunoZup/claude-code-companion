@@ -11,10 +11,12 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import crypto from "node:crypto";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { IS_WINDOWS, REPO_ROOT, makeSandbox } from "./helpers.test.mjs";
 
+const require = createRequire(import.meta.url);
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const stranger = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
 const JWK = { ...publicKey.export({ format: "jwk" }), kid: "test-key", alg: "RS256", use: "sig" };
@@ -559,6 +561,119 @@ describe("ccc gpt", () => {
       const r = sb.node("src/chatgpt.cjs", ["frobnicate"]);
       assert.equal(r.status, 1);
       assert.match(r.stderr, /usage: ccc gpt/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+});
+
+describe("plan limits, as Codex reports them", () => {
+  // A stand-in for `codex app-server`: answers initialize, then the rate-limit
+  // read, over JSON lines on stdio.
+  const STUB = `
+import { createInterface } from "node:readline";
+const answer = JSON.parse(process.env.CODEX_STUB_ANSWER || "null");
+const rl = createInterface({ input: process.stdin });
+rl.on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: "stub" } }) + "\\n");
+  if (m.method === "account/rateLimits/read") process.stdout.write(JSON.stringify(answer ? { id: m.id, result: answer } : { id: m.id, error: { message: "not signed in" } }) + "\\n");
+});
+`;
+  const ANSWER = {
+    rateLimits: {
+      limitId: "codex",
+      primary: { usedPercent: 4, windowDurationMins: 10080, resetsAt: 1793436290 },
+      secondary: { usedPercent: 30, windowDurationMins: 300, resetsAt: 1792870000 },
+      credits: { hasCredits: false, unlimited: false, balance: "0" },
+      planType: "pro",
+      rateLimitReachedType: null,
+    },
+    rateLimitResetCredits: { availableCount: 1 },
+  };
+
+  function stubCodex(sb) {
+    const file = join(sb.root, "codex-stub.mjs");
+    require("node:fs").writeFileSync(file, STUB);
+    return file;
+  }
+
+  test("reads the plan's windows, shortest first, with their resets", async () => {
+    const sb = fresh();
+    try {
+      const result = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], env: { ...process.env, CODEX_STUB_ANSWER: JSON.stringify(ANSWER) } });
+      assert.equal(result.status, "ok");
+      assert.equal(result.planType, "pro");
+      assert.deepEqual(result.windows.map((w) => [w.label, w.left, w.resetsAt]), [
+        ["5h", 70, 1792870000000],
+        ["week", 96, 1793436290000],
+      ]);
+      assert.equal(result.resetCredits, 1);
+      assert.equal(result.credits.hasCredits, false);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a Codex that refuses, or none at all, is an answer too, never a throw", async () => {
+    const sb = fresh();
+    try {
+      const refused = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], env: { ...process.env, CODEX_STUB_ANSWER: "null" } });
+      assert.deepEqual([refused.status, refused.error], ["error", "not signed in"]);
+      assert.equal((await chatgpt.askCodex({ command: null })).status, "unavailable");
+      assert.equal((await chatgpt.askCodex({ command: join(sb.root, "no-such-codex") })).status, "error");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("windows are named for their length", () => {
+    assert.deepEqual([300, 10080, 1440, 120, 45, null].map(chatgpt.windowLabel), ["5h", "week", "1d", "2h", "45m", "limit"]);
+  });
+
+  test("the newest IDE extension's Codex is found, and CCC_CODEX_BIN can name one or turn it off", () => {
+    const sb = fresh();
+    try {
+      const fs = require("node:fs");
+      const make = (version) => {
+        const dir = join(sb.home, ".vscode", "extensions", `openai.chatgpt-${version}-darwin-arm64`, "bin", "macos-aarch64");
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(join(dir, "codex"), "");
+        return join(dir, "codex");
+      };
+      make("26.917.62051");
+      const newest = make("26.1021.22027");
+      make("26.1007.21434");
+      assert.equal(chatgpt.findCodex({ env: { PATH: "" }, home: sb.home, platform: "linux" }), newest);
+      assert.equal(chatgpt.findCodex({ env: { CCC_CODEX_BIN: "none" }, home: sb.home }), null);
+      assert.equal(chatgpt.findCodex({ env: { CCC_CODEX_BIN: newest }, home: sb.home }), newest);
+      assert.equal(chatgpt.findCodex({ env: { PATH: "" }, home: join(sb.root, "empty"), platform: "linux" }), null);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("planLimits caches an answer, and falls back to the cached one when Codex cannot answer", async () => {
+    const sb = fresh();
+    try {
+      const env = { ...process.env, CCC_CODEX_BIN: process.execPath, CODEX_STUB_ANSWER: JSON.stringify(ANSWER) };
+      // CCC_CODEX_BIN names the program; the stub script goes in by a
+      // wrapper the test can run directly.
+      const fs = require("node:fs");
+      const wrapper = join(sb.root, IS_WINDOWS ? "codex.cmd" : "codex");
+      if (IS_WINDOWS) return; // a .cmd cannot be spawned without a shell; askCodex is covered above
+      fs.writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${stubCodex(sb)}" "$@"\n`);
+      fs.chmodSync(wrapper, 0o755);
+      env.CCC_CODEX_BIN = wrapper;
+      const first = await chatgpt.planLimits({ home: sb.home, env, maxAgeMs: 0 });
+      assert.equal(first.status, "ok");
+      assert.ok(existsSync(chatgpt.paths(sb.home).limits));
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT Pro", "the plan comes from Codex's answer");
+
+      const stale = await chatgpt.planLimits({ home: sb.home, env: { ...env, CCC_CODEX_BIN: "none" }, maxAgeMs: 0 });
+      assert.equal(stale.status, "ok", "the last answer stands in");
+      assert.equal(stale.fetchedAt, first.fetchedAt);
+      assert.deepEqual(chatgpt.cachedPlanLimits({ home: sb.home }).windows, first.windows);
     } finally {
       sb.cleanup();
     }
