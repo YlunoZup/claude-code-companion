@@ -177,6 +177,21 @@ function runBash(script, args, env, input, cwd) {
   });
 }
 
+/**
+ * Why the bash launchers cannot run from a home at this path, or false.
+ *
+ * Git Bash turns a /c/... argument into C:\... before handing it to a Windows
+ * program such as node, except one containing an apostrophe, which it passes on
+ * unconverted and node then cannot open. It also reads a bare apostrophe on its
+ * own command line as a quote. Under Git Bash such a home is unsupported, so
+ * those tests are skipped there rather than left failing.
+ */
+export function gitBashCannotUse(path) {
+  return IS_WINDOWS && path.includes("'")
+    ? "Git Bash hands node a path containing an apostrophe unconverted"
+    : false;
+}
+
 /** Strip ANSI SGR sequences so assertions can look at plain text. */
 export function stripAnsi(s) {
   // eslint-disable-next-line no-control-regex

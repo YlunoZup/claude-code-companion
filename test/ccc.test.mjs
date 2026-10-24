@@ -8,7 +8,7 @@ import { test, describe, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { makeSandbox } from "./helpers.test.mjs";
+import { gitBashCannotUse, makeSandbox } from "./helpers.test.mjs";
 
 /** Parse the last recorded stub invocation. */
 function lastCall(sb) {
@@ -223,7 +223,9 @@ describe("ccc add", () => {
 
 describe("home directories that need quoting", () => {
   for (const homeName of ["home with spaces", "o'brien"]) {
-    test(`ccc add works when HOME is ${JSON.stringify(homeName)}`, () => {
+    const skip = gitBashCannotUse(homeName);
+
+    test(`ccc add works when HOME is ${JSON.stringify(homeName)}`, { skip }, () => {
       const sb = makeSandbox({ homeName });
       try {
         assert.equal(sb.install().status, 0);
@@ -236,7 +238,7 @@ describe("home directories that need quoting", () => {
       }
     });
 
-    test(`ccc <n> works when HOME is ${JSON.stringify(homeName)}`, () => {
+    test(`ccc <n> works when HOME is ${JSON.stringify(homeName)}`, { skip }, () => {
       const sb = makeSandbox({ homeName });
       try {
         sb.install();

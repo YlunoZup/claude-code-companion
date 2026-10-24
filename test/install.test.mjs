@@ -7,7 +7,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeSandbox, IS_WINDOWS } from "./helpers.test.mjs";
+import { gitBashCannotUse, makeSandbox, IS_WINDOWS } from "./helpers.test.mjs";
 
 const IS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
 
@@ -267,7 +267,7 @@ describe("install.sh", () => {
 
   describe("paths that need quoting", () => {
     for (const homeName of ["home with spaces", "it's home", "home with spaces and 'quotes'"]) {
-      test(`installs into a home named ${JSON.stringify(homeName)}`, () => {
+      test(`installs into a home named ${JSON.stringify(homeName)}`, { skip: gitBashCannotUse(homeName) }, () => {
         const sb = makeSandbox({ homeName });
         try {
           const r = sb.install();

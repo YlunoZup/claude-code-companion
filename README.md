@@ -95,6 +95,8 @@ bash install.sh
 install.bat
 ```
 
+> Under Git Bash, `install.sh` and `ccc` do not work from a home folder whose path contains an apostrophe (`C:\Users\O'Brien`): Git Bash hands such a path to Node without converting it to a Windows path, and Node cannot open it.
+
 The installer will:
 1. Create `~/.claude-profiles/` with the picker, statusline, and config files
 2. Set up an `account2` directory with symlinks to shared data
