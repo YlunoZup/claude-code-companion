@@ -161,7 +161,17 @@ export function makeSandbox(opts = {}) {
     cleanup() {
       // Windows will not remove a directory a process is still running in, and
       // the claude behind a usage request can outlive its answer by a moment.
-      rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
+      // rmSync's own maxRetries does not cover a busy directory before Node 22,
+      // so retry here.
+      for (let attempt = 1; ; attempt++) {
+        try {
+          rmSync(root, { recursive: true, force: true });
+          return;
+        } catch (err) {
+          if (attempt >= 50 || !["EBUSY", "EPERM", "ENOTEMPTY"].includes(err.code)) throw err;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+        }
+      }
     },
   };
 }
