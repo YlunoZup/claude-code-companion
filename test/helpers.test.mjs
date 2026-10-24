@@ -200,7 +200,10 @@ function writeStub(dir, name, logPath) {
   if (IS_WINDOWS) {
     const lines = [
       "@echo off",
-      'if "%~1"=="-p" goto usage',
+      // The first argument goes through echo rather than `if "%~1"==...`: the
+      // router escapes each argument for an npm shim, which only ever passes
+      // %* on, and an argument escaped that way breaks an `if` comparison.
+      'echo(%1| findstr /x /c:"-p" >nul && goto usage',
       // The same drain, for the same reason.
       "more > nul 2>&1",
       `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
