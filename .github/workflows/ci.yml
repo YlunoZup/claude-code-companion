@@ -102,6 +102,10 @@ jobs:
         run: |
           set -euo pipefail
           export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          # Node takes its home directory from USERPROFILE on Windows, never
+          # HOME. Left alone, every path profiles.cjs derives from the home
+          # directory lands in the runner's real profile, not the sandbox.
+          export USERPROFILE="$(cygpath -w "$HOME")"
           mkdir -p "$HOME"
           bash install.sh "$HOME/bin"
 
@@ -116,6 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          export USERPROFILE="$(cygpath -w "$HOME")"
           node "$HOME/.claude-profiles/profiles.cjs" ensure-shared-projects "$HOME/.claude-profiles/account2"
           echo marker > "$HOME/.claude/projects/marker.txt"
           test -f "$HOME/.claude-profiles/account2/projects/marker.txt"
@@ -126,6 +131,7 @@ jobs:
         run: |
           set -euo pipefail
           export HOME="$(cygpath -u "$RUNNER_TEMP")/sandbox"
+          export USERPROFILE="$(cygpath -w "$HOME")"
           node -e '
             const fs = require("fs");
             const p = process.env.HOME + "/.claude-profiles/account2/settings.json";

@@ -155,10 +155,6 @@ describe("install.bat", { skip }, () => {
       sb.cleanup();
     }
   });
-
-  test("never recommends setx PATH, which truncates at 1024 characters", () => {
-    assert.doesNotMatch(readFileSync(join(REPO_ROOT, "install.bat"), "utf8"), /setx\s+PATH/i);
-  });
 });
 
 describe("ccc.bat", { skip }, () => {
@@ -198,12 +194,16 @@ describe("ccc.bat", { skip }, () => {
   // endlocal-then-set used to write the variable into the caller's session, so
   // every later bare `claude` in that window silently used the wrong account.
   test("does not leak CLAUDE_CONFIG_DIR into the calling session", () => {
-    const probe = spawnSync(
-      process.env.ComSpec || "cmd.exe",
-      ["/d", "/e:on", "/c", `call "${ccc}" 2 >nul & echo AFTER=[%CLAUDE_CONFIG_DIR%]`],
-      { env: sb.env, encoding: "utf8", timeout: 120000 }
+    // A batch file rather than `cmd /c "... & echo %VAR%"`: on a command line
+    // cmd expands %VAR% before anything on the line has run, and leaves an
+    // undefined one as literal text, so that probe could never see a leak.
+    const probe = join(sb.root, "probe.bat");
+    writeFileSync(
+      probe,
+      ["@echo off", `call "${ccc}" 2 >nul`, "echo AFTER=[%CLAUDE_CONFIG_DIR%]", ""].join("\r\n")
     );
-    assert.match(probe.stdout, /AFTER=\[\]/, "CLAUDE_CONFIG_DIR leaked into the caller");
+    const r = cmd(sb, probe);
+    assert.match(r.stdout, /AFTER=\[\]/, "CLAUDE_CONFIG_DIR leaked into the caller");
   });
 });
 

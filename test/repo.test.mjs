@@ -107,6 +107,18 @@ describe("the installers ship what they reference", () => {
     });
   }
 
+  // setx PATH collapses the machine and user PATH into one user variable and
+  // truncates it at 1024 characters. install.bat names it only to warn
+  // against it, which is why a bare pattern match is not enough here.
+  test("install.bat never recommends setx PATH", () => {
+    const mentions = read("install.bat")
+      .split(/\r?\n/)
+      .filter((line) => /setx\s+PATH/i.test(line));
+    for (const line of mentions) {
+      assert.match(line, /\bavoid\b/i, `recommends setx: ${line.trim()}`);
+    }
+  });
+
   test("install.sh and install.bat copy the same set of files", () => {
     const sh = read("install.sh");
     const bat = read("install.bat");

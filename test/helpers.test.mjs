@@ -19,9 +19,16 @@ export const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 export const IS_WINDOWS = process.platform === "win32";
 const NODE_DIR = dirname(process.execPath);
 
-// System directories bash and cmd need for the basics (cp, mkdir, grep, where).
+// What bash and cmd need for the basics (cp, mkdir, grep, where).
+//
+// On Windows, Git's bin comes first. System32 has a bash.exe of its own, the
+// WSL launcher, which fails outright where no Linux distribution is installed,
+// and in front of Git's it was the bash every test ran. Git's bin holds only
+// bash, sh and git, so it shadows nothing cmd needs; the rest of Git Bash's
+// tools come after Windows' own, so cmd keeps its own find and sort.
+const WINDOWS_DIR = process.env.SystemRoot || "C:\\Windows";
 const SYSTEM_PATH = IS_WINDOWS
-  ? [join(process.env.SystemRoot || "C:\\Windows", "System32"), process.env.SystemRoot || "C:\\Windows"]
+  ? ["C:\\Program Files\\Git\\bin", join(WINDOWS_DIR, "System32"), WINDOWS_DIR, "C:\\Program Files\\Git\\usr\\bin"]
   : ["/usr/bin", "/bin"];
 
 /**
@@ -47,8 +54,6 @@ export function makeSandbox(opts = {}) {
   writeStub(stubs, "claude", calls);
 
   const pathParts = [stubs, ...(node ? [NODE_DIR] : []), ...SYSTEM_PATH];
-  // Git Bash needs its own bin directories on PATH to run install.sh at all.
-  if (IS_WINDOWS) pathParts.push("C:\\Program Files\\Git\\bin", "C:\\Program Files\\Git\\usr\\bin");
 
   const env = {
     ...process.env,
@@ -131,36 +136,39 @@ export function makeSandbox(opts = {}) {
   };
 }
 
+// A stub that logs its name, CLAUDE_CONFIG_DIR and arguments instead of doing
+// anything. Windows gets two, as npm installs two: a .cmd for cmd.exe, and an
+// extensionless shell script, which is the only kind Git Bash can run.
 function writeStub(dir, name, logPath) {
-  if (IS_WINDOWS) {
-    const lines = [
-      "@echo off",
-      // Drain stdin first, as the real program would: a stub that exits
-      // without reading what it was piped makes the parent's write fail with
-      // EPIPE.
-      "more > nul 2>&1",
-      `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
-      "exit /b 0",
-    ];
-    writeFileSync(join(dir, `${name}.cmd`), lines.join("\r\n") + "\r\n");
-    return;
-  }
-
   const script = [
     "#!/bin/sh",
     // Drain stdin first, as the real program would: a stub that exits without
     // reading what it was piped makes the parent's write fail with EPIPE.
     "cat > /dev/null 2>&1",
-    `printf '%s cfg=[%s] args=[%s]\\n' "${name}" "\${CLAUDE_CONFIG_DIR-<unset>}" "$*" >> "${logPath}"`,
+    `printf '%s cfg=[%s] args=[%s]\\n' "${name}" "\${CLAUDE_CONFIG_DIR-<unset>}" "$*" >> "${logPath.replace(/\\/g, "/")}"`,
     "exit 0",
   ].join("\n");
   const file = join(dir, name);
   writeFileSync(file, script + "\n");
   chmodSync(file, 0o755);
+
+  if (IS_WINDOWS) {
+    const lines = [
+      "@echo off",
+      // The same drain, for the same reason.
+      "more > nul 2>&1",
+      `>>"${logPath}" echo ${name} cfg=[%CLAUDE_CONFIG_DIR%] args=[%*]`,
+      "exit /b 0",
+    ];
+    writeFileSync(join(dir, `${name}.cmd`), lines.join("\r\n") + "\r\n");
+  }
 }
 
 function runBash(script, args, env, input, cwd) {
-  return spawnSync("bash", [script, ...args], {
+  // Forward slashes on Windows: install.sh finds its own directory with
+  // dirname, which does not take a backslash for a separator.
+  const path = IS_WINDOWS ? script.replace(/\\/g, "/") : script;
+  return spawnSync("bash", [path, ...args], {
     env,
     input,
     cwd,

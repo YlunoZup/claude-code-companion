@@ -336,7 +336,8 @@ describe("missing dependencies", () => {
     const sb = makeSandbox();
     try {
       sb.install();
-      rmSync(join(sb.stubs, process.platform === "win32" ? "claude.cmd" : "claude"));
+      // The shell stub, and on Windows the .cmd one beside it.
+      for (const stub of ["claude", "claude.cmd"]) rmSync(join(sb.stubs, stub), { force: true });
 
       const r = sb.ccc(["2"]);
       assert.notEqual(r.status, 0);
