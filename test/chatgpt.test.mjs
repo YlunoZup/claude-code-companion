@@ -45,6 +45,7 @@ const openai = {
     this.scope = "chatgpt.tokens.use.direct email offline_access openid profile resource.invoke";
     this.refresh = null; // { status, json } to answer refreshes with
     this.refreshDelayMs = 0;
+    this.revokeDelayMs = 0;
     this.modelsStatus = 200;
   },
   count(kind) {
@@ -129,6 +130,7 @@ const server = http.createServer(async (req, res) => {
 
   if (url.pathname === "/api/accounts/oauth/revoke" && req.method === "POST") {
     openai.log.push({ kind: "revoke", form: await readForm(req) });
+    if (openai.revokeDelayMs) await new Promise((r) => setTimeout(r, openai.revokeDelayMs));
     res.writeHead(200);
     return res.end();
   }
@@ -194,6 +196,21 @@ const fresh = () => {
   openai.reset();
   return makeSandbox();
 };
+
+describe("plan labels", () => {
+  for (const [plan, label] of [
+    ["prolite", "ChatGPT Pro 100"],
+    ["pro", "ChatGPT Pro 200"],
+    ["promax", "ChatGPT Pro 500"],
+    ["plus", "ChatGPT Plus"],
+    ["go", "ChatGPT Go"],
+  ]) {
+    test(`${plan} displays as ${label}`, () => {
+      assert.equal(chatgpt.planLabel(plan), label);
+      assert.equal(chatgpt.planLabel(plan.toUpperCase()), label);
+    });
+  }
+});
 
 describe("signing in", () => {
   test("registers this machine, checks the ID token and saves the sign-in for the user alone", async () => {
@@ -444,6 +461,59 @@ describe("staying signed in", () => {
     }
   });
 
+  async function waitForRequest(kind) {
+    const deadline = Date.now() + 5000;
+    while (!openai.count(kind) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+    assert.ok(openai.count(kind), `no ${kind} request arrived`);
+  }
+
+  test("signing out while a refresh is running cannot restore the sign-in afterward", async () => {
+    const sb = await signedIn();
+    try {
+      expire(sb);
+      openai.refreshDelayMs = 150;
+      const pending = chatgpt.getAccessToken({ home: sb.home });
+      await waitForRequest("refresh_token");
+      await chatgpt.logout({ home: sb.home });
+      await pending;
+      assert.equal(chatgpt.status({ home: sb.home }).signedIn, false);
+      assert.equal(authOf(sb).refresh_token, undefined);
+    } finally { sb.cleanup(); }
+  });
+
+  test("a pending refresh cannot overwrite a newer completed login", async () => {
+    const sb = await signedIn();
+    try {
+      expire(sb);
+      const previousLogin = authOf(sb).login_id;
+      openai.refreshDelayMs = 150;
+      const pending = chatgpt.getAccessToken({ home: sb.home });
+      await waitForRequest("refresh_token");
+      const { result } = await signIn(sb.home);
+      assert.equal(result instanceof Error, false);
+      const newer = authOf(sb);
+      await pending;
+      assert.notEqual(newer.login_id, previousLogin);
+      assert.equal(authOf(sb).login_id, newer.login_id);
+      assert.equal(authOf(sb).access_token, newer.access_token);
+    } finally { sb.cleanup(); }
+  });
+
+  test("a delayed logout does not clear a newer login", async () => {
+    const sb = await signedIn();
+    try {
+      openai.revokeDelayMs = 150;
+      const pending = chatgpt.logout({ home: sb.home });
+      await waitForRequest("revoke");
+      await signIn(sb.home);
+      const newer = authOf(sb);
+      assert.equal((await pending).newerSignInKept, true);
+      assert.equal(chatgpt.status({ home: sb.home }).signedIn, true);
+      assert.equal(authOf(sb).login_id, newer.login_id);
+      assert.equal(authOf(sb).refresh_token, newer.refresh_token);
+    } finally { sb.cleanup(); }
+  });
+
   test("status says who is signed in and never carries a token", async () => {
     const sb = await signedIn();
     try {
@@ -520,7 +590,7 @@ describe("ccc gpt", () => {
   // OpenAI the CLI talks to: spawnSync would leave nobody to answer it.
   function cli(sb, args) {
     return new Promise((resolve) => {
-      const child = spawn(process.execPath, [join(REPO_ROOT, "src", "chatgpt.cjs"), ...args], { env: sb.env });
+      const child = spawn(process.execPath, [join(REPO_ROOT, "src", "chatgpt.cjs"), ...args], { env: { ...sb.env, CCC_CHATGPT_AUTH_URL: openai.base, CCC_OPENAI_API_URL: `${openai.base}/v1` } });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (c) => (stdout += c));
@@ -572,12 +642,16 @@ describe("plan limits, as Codex reports them", () => {
   // read, over JSON lines on stdio.
   const STUB = `
 import { createInterface } from "node:readline";
+import { appendFileSync } from "node:fs";
 const answer = JSON.parse(process.env.CODEX_STUB_ANSWER || "null");
+const account = JSON.parse(process.env.CODEX_STUB_ACCOUNT || '{"type":"chatgpt","email":"me@example.com","planType":"pro"}');
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const m = JSON.parse(line);
+  if (process.env.CODEX_STUB_LOG) appendFileSync(process.env.CODEX_STUB_LOG, JSON.stringify(m) + "\\n");
   if (m.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: "stub" } }) + "\\n");
-  if (m.method === "account/rateLimits/read") process.stdout.write(JSON.stringify(answer ? { id: m.id, result: answer } : { id: m.id, error: { message: "not signed in" } }) + "\\n");
+  if (m.method === "account/read") process.stdout.write(JSON.stringify({id: m.id, result: {account}}) + "\\n");
+  if (m.method === "account/rateLimits/read") setTimeout(() => process.stdout.write(JSON.stringify(answer ? { id: m.id, result: answer } : { id: m.id, error: { message: "not signed in" } }) + "\\n"), Number(process.env.CODEX_STUB_DELAY) || 0);
 });
 `;
   const ANSWER = {
@@ -598,10 +672,69 @@ rl.on("line", (line) => {
     return file;
   }
 
+  function stubCommand(sb) {
+    const fs = require("node:fs");
+    const wrapper = join(sb.root, IS_WINDOWS ? "codex.cmd" : "codex");
+    const script = stubCodex(sb);
+    fs.writeFileSync(wrapper, IS_WINDOWS ? `@echo off\r\n"${process.execPath}" "${script}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${script}" "$@"\n`);
+    fs.chmodSync(wrapper, 0o755);
+    return wrapper;
+  }
+
+  function codexEnv(sb, extra = {}) {
+    return { ...sb.env, CCC_CODEX_BIN: stubCommand(sb), CODEX_STUB_ANSWER: JSON.stringify(ANSWER), ...extra };
+  }
+
+  test("checks the account before reading usage, without starting a model turn", async () => {
+    const sb = fresh();
+    try {
+      const log = join(sb.root, "protocol.log");
+      const result = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], expectedEmail: "ME@example.com", env: { ...sb.env, CODEX_STUB_ANSWER: JSON.stringify(ANSWER), CODEX_STUB_LOG: log } });
+      assert.equal(result.status, "ok");
+      const sent = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+      assert.deepEqual(sent.map((m) => m.method), ["initialize", "initialized", "account/read", "account/rateLimits/read"]);
+      assert.deepEqual(sent[2].params, { refreshToken: false });
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("different, signed-out, API-key and unidentified Codex accounts cannot supply usage", async () => {
+    const sb = fresh();
+    try {
+      for (const [account, status] of [
+        [{ type: "chatgpt", email: "other@example.com" }, "account_mismatch"],
+        [null, "codex_signed_out"],
+        [{ type: "apiKey" }, "codex_signed_out"],
+        [{ type: "chatgpt" }, "unverified"],
+      ]) {
+        const result = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], expectedEmail: "me@example.com", env: { ...sb.env, CODEX_STUB_ACCOUNT: JSON.stringify(account), CODEX_STUB_ANSWER: JSON.stringify(ANSWER) } });
+        assert.equal(result.status, status);
+        assert.equal(result.windows, undefined);
+      }
+      assert.equal((await chatgpt.askCodex({ command: process.execPath })).status, "unverified");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a silent or malformed Codex exits within the timeout", async () => {
+    const sb = fresh();
+    try {
+      const script = join(sb.root, "silent.mjs");
+      require("node:fs").writeFileSync(script, 'process.stdin.resume(); process.stdout.write("not json\\n");');
+      const result = await chatgpt.askCodex({ command: process.execPath, args: [script], expectedEmail: "me@example.com", env: sb.env, timeoutMs: 150 });
+      assert.equal(result.status, "error");
+      assert.match(result.error, /did not answer/);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
   test("reads the plan's windows, shortest first, with their resets", async () => {
     const sb = fresh();
     try {
-      const result = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], env: { ...process.env, CODEX_STUB_ANSWER: JSON.stringify(ANSWER) } });
+      const result = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], expectedEmail: "me@example.com", env: { ...process.env, CODEX_STUB_ANSWER: JSON.stringify(ANSWER) } });
       assert.equal(result.status, "ok");
       assert.equal(result.planType, "pro");
       assert.deepEqual(result.windows.map((w) => [w.label, w.left, w.resetsAt]), [
@@ -618,10 +751,10 @@ rl.on("line", (line) => {
   test("a Codex that refuses, or none at all, is an answer too, never a throw", async () => {
     const sb = fresh();
     try {
-      const refused = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], env: { ...process.env, CODEX_STUB_ANSWER: "null" } });
+      const refused = await chatgpt.askCodex({ command: process.execPath, args: [stubCodex(sb)], expectedEmail: "me@example.com", env: { ...process.env, CODEX_STUB_ANSWER: "null" } });
       assert.deepEqual([refused.status, refused.error], ["error", "not signed in"]);
       assert.equal((await chatgpt.askCodex({ command: null })).status, "unavailable");
-      assert.equal((await chatgpt.askCodex({ command: join(sb.root, "no-such-codex") })).status, "error");
+      assert.equal((await chatgpt.askCodex({ command: join(sb.root, "no-such-codex"), expectedEmail: "me@example.com" })).status, "error");
     } finally {
       sb.cleanup();
     }
@@ -656,24 +789,108 @@ rl.on("line", (line) => {
   test("planLimits caches an answer, and falls back to the cached one when Codex cannot answer", async () => {
     const sb = fresh();
     try {
-      const env = { ...process.env, CCC_CODEX_BIN: process.execPath, CODEX_STUB_ANSWER: JSON.stringify(ANSWER) };
-      // CCC_CODEX_BIN names the program; the stub script goes in by a
-      // wrapper the test can run directly.
-      const fs = require("node:fs");
-      const wrapper = join(sb.root, IS_WINDOWS ? "codex.cmd" : "codex");
-      if (IS_WINDOWS) return; // a .cmd cannot be spawned without a shell; askCodex is covered above
-      fs.writeFileSync(wrapper, `#!/bin/sh\nexec "${process.execPath}" "${stubCodex(sb)}" "$@"\n`);
-      fs.chmodSync(wrapper, 0o755);
-      env.CCC_CODEX_BIN = wrapper;
+      await signIn(sb.home);
+      const env = codexEnv(sb);
       const first = await chatgpt.planLimits({ home: sb.home, env, maxAgeMs: 0 });
       assert.equal(first.status, "ok");
       assert.ok(existsSync(chatgpt.paths(sb.home).limits));
-      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT Pro", "the plan comes from Codex's answer");
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT Pro 200", "the plan comes from Codex's answer");
 
       const stale = await chatgpt.planLimits({ home: sb.home, env: { ...env, CCC_CODEX_BIN: "none" }, maxAgeMs: 0 });
       assert.equal(stale.status, "ok", "the last answer stands in");
       assert.equal(stale.fetchedAt, first.fetchedAt);
+      assert.equal(stale.stale, true);
       assert.deepEqual(chatgpt.cachedPlanLimits({ home: sb.home }).windows, first.windows);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a mismatched Codex sign-in invalidates cached figures and its plan label", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const env = codexEnv(sb);
+      await chatgpt.planLimits({ home: sb.home, env });
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT Pro 200");
+      const mismatch = await chatgpt.planLimits({ home: sb.home, env: { ...env, CODEX_STUB_ACCOUNT: '{"type":"chatgpt","email":"other@example.com"}' }, maxAgeMs: 0 });
+      assert.equal(mismatch.status, "account_mismatch");
+      assert.equal(mismatch.windows, undefined);
+      assert.equal(chatgpt.cachedPlanLimits({ home: sb.home }).status, "account_mismatch");
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("old unbound snapshots, logout and a new login cannot leak the previous account's usage", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const p = chatgpt.paths(sb.home);
+      sb.writeJson(p.limits, { status: "ok", planType: "pro", windows: [], fetchedAt: Date.now() });
+      assert.equal(chatgpt.cachedPlanLimits({ home: sb.home }), null);
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT");
+      const env = codexEnv(sb);
+      await chatgpt.planLimits({ home: sb.home, env });
+      await signIn(sb.home);
+      assert.equal(existsSync(p.limits), false);
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT");
+      await chatgpt.planLimits({ home: sb.home, env });
+      await chatgpt.logout({ home: sb.home });
+      assert.equal(existsSync(p.limits), false);
+      assert.equal(chatgpt.cachedPlanLimits({ home: sb.home }), null);
+      assert.equal((await chatgpt.planLimits({ home: sb.home, env })).status, "signed_out");
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("simultaneous usage queries share one app-server read", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const log = join(sb.root, "protocol.log");
+      const env = codexEnv(sb, { CODEX_STUB_LOG: log, CODEX_STUB_DELAY: "50" });
+      const answers = await Promise.all([1, 2, 3].map(() => chatgpt.planLimits({ home: sb.home, env, maxAgeMs: 0 })));
+      assert.ok(answers.every((r) => r.status === "ok"));
+      const sent = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
+      assert.equal(sent.filter((m) => m.method === "account/rateLimits/read").length, 1);
+      assert.equal(new Set(answers.map((r) => r.checkId)).size, 1);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("a lookup finishing after a new login cannot restore the old snapshot", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const log = join(sb.root, "protocol.log");
+      const env = codexEnv(sb, { CODEX_STUB_LOG: log, CODEX_STUB_DELAY: "500" });
+      const pending = chatgpt.planLimits({ home: sb.home, env, maxAgeMs: 0 });
+      const deadline = Date.now() + 5000;
+      while ((!existsSync(log) || !readFileSync(log, "utf8").includes("account/rateLimits/read")) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      assert.ok(existsSync(log) && readFileSync(log, "utf8").includes("account/rateLimits/read"));
+      await signIn(sb.home);
+      assert.equal((await pending).status, "account_changed");
+      assert.equal(existsSync(chatgpt.paths(sb.home).limits), false);
+    } finally {
+      sb.cleanup();
+    }
+  });
+
+  test("invalid percentages cannot reach the picker", () => {
+    const result = chatgpt.parsePlanLimits({ rateLimits: { primary: { usedPercent: NaN }, secondary: { usedPercent: Infinity } } });
+    assert.deepEqual(result.windows, []);
+  });
+
+  test("a Windows npm Codex shim can be discovered on Path", () => {
+    const sb = fresh();
+    try {
+      const shim = join(sb.stubs, "codex.cmd");
+      require("node:fs").writeFileSync(shim, "@echo off\r\n");
+      assert.equal(chatgpt.findCodex({ env: { Path: sb.stubs }, home: sb.home, platform: "win32" }), shim);
     } finally {
       sb.cleanup();
     }

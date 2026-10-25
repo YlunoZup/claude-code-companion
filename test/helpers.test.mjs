@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,9 +74,11 @@ export function makeSandbox(opts = {}) {
     // are flaky under load rather than wrong.
     CCC_GIT_TIMEOUT_MS: "60000",
   };
-  // A developer running the suite inside Claude Code has this set; leaking it
-  // into a child would silently rewrite what every test observes.
-  delete env.CLAUDE_CONFIG_DIR;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("ANTHROPIC_") || ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "OPENAI_BASE_URL", "CCC_ROUTER", "CCC_OPENAI_API_URL", "CCC_CHATGPT_AUTH_URL"].includes(key)) delete env[key];
+  }
+  env.CCC_CHATGPT_AUTH_URL = "http://127.0.0.1:9";
+  env.CCC_OPENAI_API_URL = "http://127.0.0.1:9/v1";
 
   return {
     root,
@@ -176,6 +179,13 @@ export function makeSandbox(opts = {}) {
       }
     },
   };
+}
+
+export function seedChatgptUsage(sb, limits) {
+  const auth = { client_id: "oaiapp_fixture", login_id: "fixture-login", account: { sub: "fixture-user", email: "me@example.com" }, refresh_token: "fixture-refresh", plan_usage: true };
+  const accountKey = createHash("sha256").update(JSON.stringify([auth.client_id, auth.account.sub, auth.account.email, auth.login_id])).digest("hex");
+  sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), auth);
+  sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), { source: "codex", accountKey, checkId: "fixture-check", ...limits });
 }
 
 // A stub that logs its name, CLAUDE_CONFIG_DIR and arguments instead of doing

@@ -179,7 +179,21 @@ for /f "tokens=1,*" %%a in ("!REST!") do (
 )
 if /i "!GPT_SUB!"=="on" goto :gpt_toggle
 if /i "!GPT_SUB!"=="off" goto :gpt_toggle
+if /i "!GPT_SUB!"=="sync" goto :gpt_sync
 node "%CHATGPT_LIB%" !REST!
+exit /b !ERRORLEVEL!
+:gpt_sync
+set "REST=!GPT_MORE!"
+call :take_slot
+if errorlevel 1 (
+    echo   Usage: ccc gpt sync ^<number^>
+    exit /b 1
+)
+if defined MORE (
+    echo   Usage: ccc gpt sync ^<number^>
+    exit /b 1
+)
+node "%PROFILES_LIB%" sync-gpt !SLOT!
 exit /b !ERRORLEVEL!
 :gpt_toggle
 set "REST=!GPT_MORE!"

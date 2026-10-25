@@ -975,6 +975,175 @@ describe("ensureGptAccount", () => {
   });
 });
 
+describe("syncGptWorkflow", () => {
+  function setup(sb) {
+    const targetDir = join(sb.profilesDir, "account6");
+    const pluginDir = join(sb.claudeDir, "plugins", "cache", "formatter");
+    mkdirSync(pluginDir, { recursive: true });
+    sb.writeJson(sb.configPath, { accounts: { 1: { name: "Claude", configDir: null }, 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+    sb.writeJson(join(sb.claudeDir, "settings.json"), {
+      enabledPlugins: { "formatter@official": true },
+      pluginConfigs: { "formatter@official": { options: { style: "compact" }, mcpServers: { private: { apiKey: "SOURCE-SECRET" } } } },
+      permissions: { defaultMode: "bypassPermissions" },
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "do-not-copy" }] }] },
+      env: { PRIVATE_TOKEN: "SOURCE-SECRET" }, model: "opus", statusLine: { command: "source-line" },
+    });
+    sb.writeJson(join(sb.claudeDir, "plugins", "installed_plugins.json"), { version: 2, plugins: { "formatter@official": [{ scope: "user", installPath: pluginDir, version: "1.0" }] } });
+    sb.writeJson(join(sb.claudeDir, "plugins", "known_marketplaces.json"), { official: { source: { source: "github", repo: "example/plugins" }, installLocation: join(sb.claudeDir, "plugins", "marketplaces", "official") } });
+    sb.writeJson(join(sb.home, ".claude.json"), {
+      oauthAccount: { emailAddress: "SOURCE-IDENTITY" },
+      mcpServers: { public: { type: "http", url: "https://mcp.example.com/rpc", oauth: { clientId: "public-client", callbackPort: 1456 } } },
+    });
+    sb.writeJson(join(sb.claudeDir, ".credentials.json"), { token: "SOURCE-SECRET" });
+    sb.writeJson(join(targetDir, "settings.json"), { theme: "light", permissions: { deny: ["Bash(rm *)"] }, statusLine: { command: "target-line" } });
+    sb.writeJson(join(targetDir, ".claude.json"), { oauthAccount: { emailAddress: "TARGET-IDENTITY" }, hasCompletedOnboarding: true });
+    return { targetDir, pluginDir, sync: () => profiles.syncGptWorkflow({ home: sb.home, sourceKey: "1" }) };
+  }
+
+  test("copies local plugins and public MCP configuration, not logins or permissions", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, pluginDir, sync } = setup(sb);
+      const r = sync();
+      assert.equal(r.status, "ok");
+      assert.deepEqual(r.plugins, ["formatter@official"]);
+      assert.deepEqual(r.servers, ["public"]);
+      const s = sb.readJson(join(targetDir, "settings.json"));
+      assert.deepEqual(s.enabledPlugins, { "formatter@official": true });
+      assert.deepEqual(s.pluginConfigs, { "formatter@official": { options: { style: "compact" } } });
+      assert.deepEqual(s.permissions, { deny: ["Bash(rm *)"] });
+      assert.deepEqual(s.statusLine, { command: "target-line" });
+      assert.equal(s.hooks, undefined);
+      assert.equal(s.env, undefined);
+      assert.equal(s.model, undefined);
+      assert.equal(existsSync(join(targetDir, ".credentials.json")), false);
+      const state = sb.readJson(join(targetDir, ".claude.json"));
+      assert.equal(state.oauthAccount.emailAddress, "TARGET-IDENTITY");
+      assert.equal(state.hasCompletedOnboarding, true);
+      assert.deepEqual(state.mcpServers.public.oauth, { clientId: "public-client", callbackPort: 1456 });
+      const registry = sb.readJson(join(targetDir, "plugins", "installed_plugins.json"));
+      assert.equal(registry.plugins["formatter@official"][0].installPath, pluginDir);
+      assert.equal(JSON.stringify([s, state, registry]).includes("SOURCE-SECRET"), false);
+      assert.equal(sync().plugins.length, 0);
+    } finally { sb.cleanup(); }
+  });
+
+  test("existing plugin disables, server choices, and registry entries win", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, sync } = setup(sb);
+      const file = join(targetDir, "settings.json");
+      sb.writeJson(file, { ...sb.readJson(file), enabledPlugins: { "formatter@official": false } });
+      const stateFile = join(targetDir, ".claude.json");
+      const server = { type: "http", url: "https://own.example.com/rpc" };
+      sb.writeJson(stateFile, { ...sb.readJson(stateFile), mcpServers: { public: server } });
+      assert.deepEqual(sync().plugins, []);
+      assert.equal(sb.readJson(file).enabledPlugins["formatter@official"], false);
+      assert.deepEqual(sb.readJson(stateFile).mcpServers.public, server);
+      assert.equal(existsSync(join(targetDir, "plugins", "installed_plugins.json")), false);
+    } finally { sb.cleanup(); }
+  });
+
+  test("servers with inline credentials or executable arguments require manual setup", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, sync } = setup(sb);
+      const file = join(sb.home, ".claude.json");
+      sb.writeJson(file, { ...sb.readJson(file), mcpServers: {
+        privateHeader: { type: "http", url: "https://mcp.example.com/rpc", headers: { Authorization: "SECRET" } },
+        privateQuery: { type: "sse", url: "https://mcp.example.com/sse?key=SECRET" },
+        privateUrl: { type: "http", url: "https://user:SECRET@mcp.example.com/rpc" },
+        privateOauth: { type: "http", url: "https://mcp.example.com/rpc", oauth: { clientSecret: "SECRET" } },
+        executable: { type: "stdio", command: "node", args: ["secret-script"] },
+      } });
+      const r = sync();
+      assert.equal(r.status, "ok");
+      assert.equal(r.servers.length, 0);
+      assert.equal(r.skipped.length, 5);
+      assert.equal(sb.readJson(join(targetDir, ".claude.json")).mcpServers, undefined);
+    } finally { sb.cleanup(); }
+  });
+
+  test("links local skills and instructions without replacing target customizations or sharing cloud-synced skills", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, sync } = setup(sb);
+      sb.writeJson(join(sb.claudeDir, "skills", "local", "fixture.json"), { local: true });
+      sb.writeJson(join(sb.claudeDir, "skills", "synced", "cloud.json"), { cloud: true });
+      sb.writeJson(join(sb.claudeDir, "commands", "existing.json"), { source: true });
+      sb.writeJson(join(targetDir, "commands", "existing.json"), { target: true });
+      writeFileSync(join(sb.claudeDir, "CLAUDE.md"), "shared instructions");
+      const r = sync();
+      assert.deepEqual(r.linked.sort(), ["CLAUDE.md", "skills/local"]);
+      assert.equal(readFileSync(join(targetDir, "CLAUDE.md"), "utf8"), "shared instructions");
+      assert.equal(existsSync(join(targetDir, "skills", "synced")), false);
+      assert.deepEqual(sb.readJson(join(targetDir, "commands", "existing.json")), { target: true });
+    } finally { sb.cleanup(); }
+  });
+
+  test("invalid destination JSON refuses the entire sync before anything is written", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, sync } = setup(sb);
+      const settings = readFileSync(join(targetDir, "settings.json"), "utf8");
+      const file = join(targetDir, "plugins", "known_marketplaces.json");
+      mkdirSync(join(targetDir, "plugins"), { recursive: true });
+      writeFileSync(file, "broken json");
+      assert.equal(sync().status, "invalid");
+      assert.equal(readFileSync(file, "utf8"), "broken json");
+      assert.equal(readFileSync(join(targetDir, "settings.json"), "utf8"), settings);
+      assert.equal(existsSync(join(targetDir, "plugins", "installed_plugins.json")), false);
+    } finally { sb.cleanup(); }
+  });
+
+  test("detects a target changed by another session before writing the merge", () => {
+    const sb = makeSandbox();
+    const fs = require("node:fs");
+    const read = fs.readFileSync;
+    try {
+      const { targetDir, sync } = setup(sb);
+      const file = join(targetDir, "settings.json");
+      const updated = { ...sb.readJson(file), theme: "dark", newChoice: true };
+      let count = 0;
+      fs.readFileSync = (name, ...args) => {
+        if (name === file && ++count === 2) writeFileSync(file, JSON.stringify(updated));
+        return read(name, ...args);
+      };
+      assert.equal(sync().status, "changed");
+      fs.readFileSync = read;
+      assert.deepEqual(sb.readJson(file), updated);
+      assert.equal(existsSync(join(targetDir, "plugins", "installed_plugins.json")), false);
+    } finally {
+      fs.readFileSync = read;
+      sb.cleanup();
+    }
+  });
+
+  test("does not take over a marketplace with the same name and a different source", () => {
+    const sb = makeSandbox();
+    try {
+      const { targetDir, sync } = setup(sb);
+      const known = { official: { source: { source: "github", repo: "another/plugins" } } };
+      sb.writeJson(join(targetDir, "plugins", "known_marketplaces.json"), known);
+      const r = sync();
+      assert.equal(r.plugins.length, 0);
+      assert.match(r.skipped[0], /different marketplace/);
+      assert.deepEqual(sb.readJson(join(targetDir, "plugins", "known_marketplaces.json")), known);
+    } finally { sb.cleanup(); }
+  });
+
+  test("requires a Claude source and an existing ChatGPT profile", () => {
+    const sb = makeSandbox();
+    try {
+      setup(sb);
+      assert.equal(profiles.syncGptWorkflow({ home: sb.home, sourceKey: "99" }).status, "bad-source");
+      assert.equal(profiles.syncGptWorkflow({ home: sb.home, sourceKey: "6" }).status, "bad-source");
+      sb.writeJson(sb.configPath, { accounts: { 1: { name: "Claude", configDir: null } } });
+      assert.equal(profiles.syncGptWorkflow({ home: sb.home, sourceKey: "1" }).status, "no-gpt");
+    } finally { sb.cleanup(); }
+  });
+});
+
 describe("launchMode", () => {
   const config = {
     accounts: {

@@ -64,6 +64,7 @@ function paths(home) {
     lock: path.join(dir, "auth.lock"),
     models: path.join(dir, "models.json"),
     limits: path.join(dir, "limits.json"),
+    limitsLock: path.join(dir, "limits.lock"),
     sessions: path.join(dir, "sessions"),
     log: path.join(dir, "router.log"),
   };
@@ -202,7 +203,7 @@ function planFrom(claims) {
 
 function planLabel(plan) {
   if (!plan) return "ChatGPT";
-  const known = { pro: "Pro", plus: "Plus", go: "Go", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free" };
+  const known = { prolite: "Pro 100", pro: "Pro 200", promax: "Pro 500", plus: "Plus", go: "Go", team: "Team", business: "Business", enterprise: "Enterprise", edu: "Edu", free: "Free" };
   return `ChatGPT ${known[String(plan).toLowerCase()] || plan}`;
 }
 
@@ -214,9 +215,8 @@ function status({ home } = {}) {
   const auth = readJson(p.auth);
   const signedIn = Boolean(auth && auth.refresh_token);
   const account = (auth && auth.account) || {};
-  // OpenAI's sign-in does not say which plan it is; Codex's last answer does.
-  const limits = readJson(p.limits);
-  const plan = account.plan || (limits && limits.status === "ok" && limits.planType) || null;
+  const limits = cachedPlanLimits({ home });
+  const plan = signedIn ? account.plan || (limits && limits.status === "ok" && limits.planType) || null : null;
   return {
     signedIn,
     planUsage: Boolean(signedIn && auth.plan_usage),
@@ -263,9 +263,15 @@ function toMs(value) {
 // so signing in again reuses the registration.
 function clearTokens(p) {
   const auth = readJson(p.auth);
-  if (!auth) return;
-  const { access_token, refresh_token, id_token, expires_at, earliest_refresh_at, ...keep } = auth;
-  writePrivate(p.auth, { ...keep, plan_usage: false, signed_out_at: Date.now() });
+  if (auth) {
+    const { access_token, refresh_token, id_token, expires_at, earliest_refresh_at, ...keep } = auth;
+    writePrivate(p.auth, { ...keep, plan_usage: false, signed_out_at: Date.now() });
+  }
+  for (const file of [p.models, p.limits]) {
+    try {
+      fs.unlinkSync(file);
+    } catch {}
+  }
 }
 
 // ── Lock ─────────────────────────────────────────────────────
@@ -288,7 +294,7 @@ async function withLock(p, fn) {
           continue;
         }
       } catch {}
-      if (Date.now() > deadline) throw new ChatGPTError("locked", "another ccc process has been refreshing the ChatGPT sign-in for too long");
+      if (Date.now() > deadline) throw new ChatGPTError("locked", "another ccc process has been updating the ChatGPT sign-in for too long");
       await new Promise((r) => setTimeout(r, 100));
     }
   }
@@ -388,14 +394,20 @@ async function listModels({ home, maxAgeMs = MODELS_MAX_AGE_MS, timeoutMs = 8000
 
 // ── Plan limits ──────────────────────────────────────────────
 //
-// OpenAI tells a tool on this route nothing about how much of the plan is
-// left. Codex can: its app-server reports the plan's limits for the Codex
-// sign-in, and requests made here count against the same allowance. So ccc
-// asks a Codex that is already installed — the CLI, the IDE extension or the
-// desktop app — and Codex answers with its own login, which ccc never reads.
-// CCC_CODEX_BIN names a Codex to use; "none" turns this off.
+// Codex reports its own allowance, not ccc's connected-app cap. Only show it
+// when account/read matches the email in ccc's verified ChatGPT sign-in.
+// Codex handles its own credentials; ccc never reads its auth.json.
 
 const LIMITS_FRESH_MS = 2 * 60 * 1000;
+
+function usageAccount(auth) {
+  const email = auth && auth.account && auth.account.email;
+  if (!auth || !auth.refresh_token || !auth.plan_usage || typeof email !== "string" || !email.trim()) return null;
+  return {
+    email: email.trim().toLowerCase(),
+    key: crypto.createHash("sha256").update(JSON.stringify([auth.client_id, auth.account.sub, email.trim().toLowerCase(), auth.login_id])).digest("hex"),
+  };
+}
 
 function versionOf(dir) {
   const m = /-(\d+(?:\.\d+)*)-/.exec(path.basename(dir));
@@ -416,9 +428,11 @@ function newerFirst(a, b) {
 function findCodex({ env = process.env, home = os.homedir(), platform = process.platform } = {}) {
   if (env.CCC_CODEX_BIN) return env.CCC_CODEX_BIN === "none" ? null : fs.existsSync(env.CCC_CODEX_BIN) ? env.CCC_CODEX_BIN : null;
   const exe = platform === "win32" ? "codex.exe" : "codex";
-  for (const dir of String(env.PATH || "").split(path.delimiter).filter(Boolean)) {
-    const candidate = path.join(dir, exe);
-    if (fs.existsSync(candidate)) return candidate;
+  for (const dir of String(env.PATH || env.Path || "").split(platform === "win32" ? ";" : path.delimiter).filter(Boolean)) {
+    for (const name of platform === "win32" ? [exe, "codex.cmd"] : [exe]) {
+      const candidate = path.join(dir.replace(/^"|"$/g, ""), name);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
   // The IDE extension ships its own, one folder per version.
   for (const editor of [".vscode", ".vscode-insiders", ".cursor", ".windsurf"]) {
@@ -463,14 +477,14 @@ function windowLabel(minutes) {
 //     credits, resetCredits, reached, fetchedAt }
 // windows shortest first; resetsAt in epoch ms.
 function parsePlanLimits(result, fetchedAt = Date.now()) {
-  const limits = result && (result.rateLimits || (result.rateLimitsByLimitId && result.rateLimitsByLimitId.codex));
+  const limits = result && ((result.rateLimitsByLimitId && result.rateLimitsByLimitId.codex) || result.rateLimits);
   if (!limits || typeof limits !== "object") return { status: "unavailable" };
   const windows = [];
   for (const w of [limits.primary, limits.secondary]) {
-    if (!w || typeof w.usedPercent !== "number") continue;
+    if (!w || !Number.isFinite(w.usedPercent)) continue;
     const used = Math.min(100, Math.max(0, w.usedPercent));
-    const minutes = Number(w.windowDurationMins) || null;
-    windows.push({ label: windowLabel(minutes), minutes, used, left: 100 - used, resetsAt: w.resetsAt ? w.resetsAt * 1000 : null });
+    const minutes = Number.isFinite(w.windowDurationMins) && w.windowDurationMins > 0 ? w.windowDurationMins : null;
+    windows.push({ label: windowLabel(minutes), minutes, used, left: 100 - used, resetsAt: Number.isFinite(w.resetsAt) && w.resetsAt > 0 ? w.resetsAt * 1000 : null });
   }
   windows.sort((a, b) => (a.minutes || 0) - (b.minutes || 0));
   const reset = result.rateLimitResetCredits;
@@ -485,28 +499,37 @@ function parsePlanLimits(result, fetchedAt = Date.now()) {
   };
 }
 
-// Ask Codex. Never rejects: a failure is { status: "error", error }.
-function askCodex({ command, args = ["app-server"], timeoutMs = 10000, env = process.env } = {}) {
+function askCodex({ command, args = ["app-server"], expectedEmail, timeoutMs = 10000, env = process.env } = {}) {
   return new Promise((resolve) => {
     if (!command) {
       resolve({ status: "unavailable", error: "no Codex installed" });
       return;
     }
+    if (!expectedEmail) {
+      resolve({ status: "unverified", error: "ccc's ChatGPT account could not be identified" });
+      return;
+    }
     let child;
     try {
-      child = spawn(command, args, { stdio: ["pipe", "pipe", "ignore"], env, windowsHide: true });
+      const spawnProgram = process.platform === "win32" ? require("./router.cjs").spawnClaude : spawn;
+      child = spawnProgram(command, args, { stdio: ["pipe", "pipe", "ignore"], env, windowsHide: true });
     } catch (err) {
       resolve({ status: "error", error: err.message });
       return;
     }
     let settled = false;
     let buffered = "";
+    let expectedId = 1;
+    let killTimer;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      child.stdin.end();
       try {
         child.kill();
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 1000);
+        killTimer.unref();
       } catch {}
       resolve(result);
     };
@@ -517,13 +540,18 @@ function askCodex({ command, args = ["app-server"], timeoutMs = 10000, env = pro
       } catch {}
     };
     child.on("error", (err) => finish({ status: "error", error: err.message }));
-    child.on("close", () => finish({ status: "error", error: "Codex exited without answering" }));
+    child.on("close", () => {
+      clearTimeout(killTimer);
+      finish({ status: "error", error: "Codex exited without answering" });
+    });
     child.stdin.on("error", () => {});
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
+      if (settled) return;
       buffered += chunk;
+      if (buffered.length > 1024 * 1024) return finish({ status: "error", error: "Codex's answer was too large" });
       let newline;
-      while ((newline = buffered.indexOf("\n")) >= 0) {
+      while (!settled && (newline = buffered.indexOf("\n")) >= 0) {
         const line = buffered.slice(0, newline);
         buffered = buffered.slice(newline + 1);
         let message;
@@ -532,11 +560,21 @@ function askCodex({ command, args = ["app-server"], timeoutMs = 10000, env = pro
         } catch {
           continue;
         }
-        if (message.id === 1) {
+        if (!message || message.id !== expectedId) continue;
+        if (message.error || !message.result) return finish({ status: "error", error: (message.error && message.error.message) || "Codex refused" });
+        if (expectedId === 1) {
+          expectedId = 2;
           send({ method: "initialized" });
-          send({ method: "account/rateLimits/read", id: 2 });
-        } else if (message.id === 2) {
-          finish(message.result ? parsePlanLimits(message.result) : { status: "error", error: (message.error && message.error.message) || "Codex refused" });
+          send({ method: "account/read", id: 2, params: { refreshToken: false } });
+        } else if (expectedId === 2) {
+          const account = message.result.account;
+          if (!account || account.type !== "chatgpt") return finish({ status: "codex_signed_out", error: "Codex needs a ChatGPT sign-in, not an API key" });
+          if (typeof account.email !== "string" || !account.email.trim()) return finish({ status: "unverified", error: "Codex did not identify its ChatGPT account" });
+          if (account.email.trim().toLowerCase() !== expectedEmail.trim().toLowerCase()) return finish({ status: "account_mismatch", error: "Codex is signed in to a different ChatGPT account" });
+          expectedId = 3;
+          send({ method: "account/rateLimits/read", id: 3 });
+        } else {
+          finish(parsePlanLimits(message.result));
         }
       }
     });
@@ -544,26 +582,42 @@ function askCodex({ command, args = ["app-server"], timeoutMs = 10000, env = pro
   });
 }
 
-// The plan's limits: from cache when it is recent, else asked of Codex now and
-// cached. Falls back to the last answer there is, marked by its fetchedAt.
 async function planLimits({ home, maxAgeMs = LIMITS_FRESH_MS, env = process.env, timeoutMs } = {}) {
   const p = paths(home);
-  const cached = readJson(p.limits);
-  if (cached && cached.status === "ok" && Date.now() - cached.fetchedAt < maxAgeMs) return cached;
-  const fresh = await askCodex({ command: findCodex({ env, home: home || os.homedir() }), env, timeoutMs });
-  if (fresh.status === "ok") {
-    try {
-      writePrivate(p.limits, fresh);
-    } catch {}
-    return fresh;
+  const account = usageAccount(readJson(p.auth));
+  if (!account) return { status: "signed_out", error: "ccc needs an identifiable ChatGPT sign-in" };
+  const before = cachedPlanLimits({ home });
+  if (before && before.status === "ok" && Date.now() - before.fetchedAt < maxAgeMs) return before;
+  try {
+    return await withLock({ ...p, lock: p.limitsLock }, async () => {
+      const cached = cachedPlanLimits({ home });
+      if (cached && (cached.checkId !== (before && before.checkId) || (cached.status === "ok" && Date.now() - cached.fetchedAt < maxAgeMs))) return cached;
+      const fresh = await askCodex({ command: findCodex({ env, home: home || os.homedir() }), expectedEmail: account.email, env, timeoutMs });
+      const current = usageAccount(readJson(p.auth));
+      if (!current || current.key !== account.key) return { status: "account_changed", error: "the ChatGPT sign-in changed during the usage lookup" };
+      const cannotVerify = ["account_mismatch", "codex_signed_out", "unverified"].includes(fresh.status);
+      const result = !cannotVerify && fresh.status !== "ok" && cached && cached.status === "ok"
+        ? { ...cached, stale: true, refreshError: fresh.error || "Codex could not report usage" }
+        : fresh;
+      const bound = { ...result, source: "codex", accountKey: account.key, checkId: crypto.randomUUID() };
+      try {
+        writePrivate(p.limits, bound);
+      } catch {}
+      return bound;
+    });
+  } catch {
+    const current = cachedPlanLimits({ home });
+    return current && current.status === "ok" ? { ...current, stale: true, refreshError: "the usage lookup did not finish" } : { status: "error", error: "the usage lookup did not finish" };
   }
-  return cached && cached.status === "ok" ? cached : fresh;
 }
 
-// The cached answer alone, for the statusline, which must not wait on Codex.
 function cachedPlanLimits({ home } = {}) {
-  const cached = readJson(paths(home).limits);
-  return cached && cached.status === "ok" ? cached : null;
+  const p = paths(home);
+  const account = usageAccount(readJson(p.auth));
+  const cached = readJson(p.limits);
+  if (!account || !cached || cached.source !== "codex" || cached.accountKey !== account.key) return null;
+  if (cached.status === "ok" && (!Number.isFinite(cached.fetchedAt) || !Array.isArray(cached.windows))) return null;
+  return cached;
 }
 
 // Whether a model id is one of the GPT models, by the cached list or its name.
@@ -745,25 +799,29 @@ async function login({ home, fresh = false, browser = true, say = () => {}, inpu
   }
 
   const claims = await verifyIdToken(res.json.id_token, { doc, clientId: outcome.clientId, nonce });
-  host.client_id = outcome.clientId;
-  writePrivate(p.host, host);
-
   const account = {
     sub: claims.sub,
     email: claims.email || null,
     name: claims.name || null,
     plan: planFrom(claims),
   };
-  const saved = saveTokens(p, null, res.json, {
-    client_id: outcome.clientId,
-    account,
-    token_endpoint: doc.token_endpoint,
-    revocation_endpoint: doc.revocation_endpoint || null,
+  const saved = await withLock(p, async () => {
+    host.client_id = outcome.clientId;
+    writePrivate(p.host, host);
+    const record = saveTokens(p, null, res.json, {
+      client_id: outcome.clientId,
+      login_id: crypto.randomUUID(),
+      account,
+      token_endpoint: doc.token_endpoint,
+      revocation_endpoint: doc.revocation_endpoint || null,
+    });
+    for (const file of [p.models, p.limits]) {
+      try {
+        fs.unlinkSync(file);
+      } catch {}
+    }
+    return record;
   });
-  // Whatever models the last account had may not be this one's.
-  try {
-    fs.unlinkSync(p.models);
-  } catch {}
   return { ...status({ home }), planUsage: saved.plan_usage, firstTime: !reusing };
 }
 
@@ -772,7 +830,14 @@ async function login({ home, fresh = false, browser = true, say = () => {}, inpu
 async function logout({ home } = {}) {
   const p = paths(home);
   const auth = readJson(p.auth);
-  if (!auth || !auth.refresh_token) return { wasSignedIn: false, revoked: false };
+  if (!auth || !auth.refresh_token) {
+    return withLock(p, async () => {
+      const current = readJson(p.auth);
+      if (current && current.refresh_token) return { wasSignedIn: false, revoked: false, newerSignInKept: true };
+      clearTokens(p);
+      return { wasSignedIn: false, revoked: false };
+    });
+  }
   let revoked = false;
   try {
     const endpoint = auth.revocation_endpoint || (await discovery()).revocation_endpoint;
@@ -781,11 +846,13 @@ async function logout({ home } = {}) {
       revoked = res.status === 200;
     }
   } catch {}
-  clearTokens(p);
-  try {
-    fs.unlinkSync(p.models);
-  } catch {}
-  return { wasSignedIn: true, revoked };
+  return withLock(p, async () => {
+    const current = readJson(p.auth);
+    const changed = current && (current.login_id !== auth.login_id || current.client_id !== auth.client_id || (current.account && current.account.sub) !== (auth.account && auth.account.sub));
+    if (changed) return { wasSignedIn: true, revoked, newerSignInKept: true };
+    clearTokens(p);
+    return { wasSignedIn: true, revoked };
+  });
 }
 
 // ── CLI ──────────────────────────────────────────────────────
@@ -798,6 +865,8 @@ const HELP = `usage: ccc gpt <command>
   status             show the sign-in and the GPT models it gives
   models             list the GPT models, refreshed from OpenAI
   on <n> | off <n>   always (or no longer) offer the GPT models in account n
+  sync <n>           copy account n's plugins and public MCP setup into the
+                     ChatGPT profile, preserving existing choices and logins
 
 Requests to GPT models count against your ChatGPT plan.
 Manage how much ccc may use at ${USAGE_URL}`;
@@ -830,6 +899,7 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
       say("You're using your ChatGPT plan");
       say("GPT requests from Claude Code now count against your ChatGPT plan.");
       say(`Manage usage: ${USAGE_URL}`);
+      say("Connected-app credit spending can cost extra if you enable it there.");
       if (slot) {
         say("");
         say(slot.created ? `Added account ${slot.key}, "${slot.name}": start it with  ccc ${slot.key}` : `Account ${slot.key} runs Claude Code on GPT models: ccc ${slot.key}`);
@@ -841,7 +911,8 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
 
     case "logout": {
       const result = await logout();
-      if (!result.wasSignedIn) say("ChatGPT was not signed in.");
+      if (result.newerSignInKept) say(`A newer ChatGPT sign-in was kept; ${result.revoked ? "the previous sign-in was revoked" : "OpenAI did not confirm revocation of the previous sign-in"}.`);
+      else if (!result.wasSignedIn) say("ChatGPT was not signed in.");
       else if (result.revoked) say("Signed ChatGPT out and revoked ccc's access.");
       else {
         say("Signed ChatGPT out here, but OpenAI did not confirm the access was revoked.");
@@ -862,14 +933,16 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
       }
       const limits = await planLimits({ maxAgeMs: 0 });
       const now = Date.now();
-      say(`ChatGPT: signed in as ${s.email || "(unknown)"} · ${planLabel(s.plan || (limits.status === "ok" && limits.planType))}`);
+      const current = status();
+      say(`ChatGPT: ${current.signedIn ? `signed in as ${current.email || "(unknown)"} · ${current.planLabel}` : "signed out during the usage lookup"}`);
       say(s.planUsage ? `Plan usage: on — GPT requests count against your plan. Manage usage: ${USAGE_URL}` : "Plan usage: not allowed — run ccc gpt login and allow it");
       if (limits.status === "ok" && limits.windows.length) {
         const parts = limits.windows.map((w) => `${w.label} ${Math.round(w.left)}% left${w.resetsAt ? ` (resets ${formatReset(w.resetsAt, now)})` : ""}`);
-        const age = now - limits.fetchedAt > LIMITS_FRESH_MS ? `, as of ${Math.round((now - limits.fetchedAt) / 60000)} min ago` : "";
-        say(`Usage left: ${parts.join(" · ")}${age} — the whole plan, as Codex reports it`);
+        const age = limits.stale || now - limits.fetchedAt > LIMITS_FRESH_MS ? ` (cached, ${Math.max(1, Math.round((now - limits.fetchedAt) / 60000))} min ago)` : "";
+        say(`Usage left: ${parts.join(" · ")}${age} — Codex allowance for the same account email, not ccc's app cap`);
+        if (limits.refreshError) say(`Usage refresh: ${limits.refreshError}`);
       } else {
-        say(`Usage left: ${limits.status === "unavailable" ? "needs Codex installed and signed in to report it" : `Codex could not report it (${limits.error})`}; see ${USAGE_URL}`);
+        say(`Usage left: ${limits.error || "Codex reported no usage windows"}; see ${USAGE_URL}`);
       }
       const models = await listModels();
       if (models.length) say(`Models: ${models.map((m) => `${m.name} (${m.id})`).join(", ")}`);

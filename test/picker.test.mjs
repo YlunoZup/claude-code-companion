@@ -9,7 +9,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeSandbox, stripAnsi, usageAnswer } from "./helpers.test.mjs";
+import { makeSandbox, stripAnsi, usageAnswer, seedChatgptUsage } from "./helpers.test.mjs";
 
 describe("stdout contract", () => {
   test("choosing an account writes only its number to stdout", () => {
@@ -421,7 +421,7 @@ describe("the ChatGPT account", () => {
       assert.match(ui, /\[6\]\s+●\s+ChatGPT/);
       assert.match(ui, /me@example\.com\s+·\s+ChatGPT/);
       assert.match(ui, /GPT models in Claude Code, on your ChatGPT plan/);
-      assert.match(ui, /usage: chatgpt\.com\/settings\/usage/);
+      assert.match(ui, /app cap: chatgpt\.com\/settings\/usage/);
     } finally {
       sb.cleanup();
     }
@@ -476,22 +476,42 @@ describe("the ChatGPT account", () => {
   });
 });
 
+for (const [plan, label] of [
+  ["prolite", "ChatGPT Pro 100"],
+  ["pro", "ChatGPT Pro 200"],
+  ["promax", "ChatGPT Pro 500"],
+  ["plus", "ChatGPT Plus"],
+  ["go", "ChatGPT Go"],
+]) {
+  test(`the picker identifies ${label} from the reported plan`, () => {
+    const sb = makeSandbox();
+    try {
+      sb.writeJson(sb.configPath, { accounts: { 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
+      seedChatgptUsage(sb, { status: "ok", planType: plan, windows: [], fetchedAt: Date.now() });
+      const result = sb.node("src/picker.mjs", ["--list"]);
+      assert.equal(result.status, 0, result.stderr);
+      const ui = stripAnsi(result.stdout);
+      assert.ok(ui.includes(`me@example.com  ·  ${label}`), ui);
+      assert.match(ui, /\[6\]\s+●\s+ChatGPT/);
+    } finally { sb.cleanup(); }
+  });
+}
+
 test("the ChatGPT account shows the plan's usage as Codex last reported it", () => {
   const sb = makeSandbox();
   try {
     sb.writeJson(sb.configPath, { accounts: { 6: { name: "ChatGPT", configDir: "account6", provider: "chatgpt" } } });
-    sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), { client_id: "c", account: { email: "me@example.com" }, access_token: "a", refresh_token: "r", plan_usage: true, expires_at: Date.now() + 3600000 });
-    // The sandbox has no Codex to ask, so the last answer stands in.
-    sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), {
+    seedChatgptUsage(sb, {
       status: "ok",
       planType: "pro",
       windows: [{ label: "week", minutes: 10080, used: 4, left: 96, resetsAt: Date.now() + 5 * 86400000 + 3600000 }],
       fetchedAt: Date.now() - 20 * 60000,
     });
     const ui = stripAnsi(sb.node("src/picker.mjs", ["--list"]).stdout);
-    assert.match(ui, /me@example\.com\s+·\s+ChatGPT Pro/);
+    assert.match(ui, /me@example\.com\s+·\s+ChatGPT Pro 200\b/);
     assert.match(ui, /week\s+█+░*\s+96% left · resets in 5d/);
-    assert.match(ui, /as Codex reported 2[01]m ago/);
+    assert.match(ui, /Codex allowance, not ccc's app cap/);
+    assert.match(ui, /cached · 2[01]m ago/);
   } finally {
     sb.cleanup();
   }

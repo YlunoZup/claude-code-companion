@@ -728,6 +728,19 @@ describe("ccc and the GPT models", () => {
     assert.match(r.stderr, /Usage: ccc gpt on <number>/);
   });
 
+  test("ccc gpt sync copies public MCP setup without changing profile permissions", () => {
+    sb.writeJson(join(sb.home, ".claude.json"), { mcpServers: { fixture: { type: "http", url: "https://mcp.example.com/rpc" } } });
+    const file = join(sb.profilesDir, "account6", "settings.json");
+    sb.writeJson(file, { theme: "dark", permissions: { deny: ["Bash(rm *)"] } });
+    const r = sb.ccc(["gpt", "sync", "1"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /ChatGPT account 6: added 0 plugins, 1 public MCP/);
+    assert.deepEqual(sb.readJson(file).permissions, { deny: ["Bash(rm *)"] });
+    assert.equal(sb.readJson(join(sb.profilesDir, "account6", ".claude.json")).mcpServers.fixture.url, "https://mcp.example.com/rpc");
+    assert.equal(sb.ccc(["gpt", "sync"]).status, 1);
+    assert.equal(sb.ccc(["gpt", "sync", "1", "extra"]).status, 1);
+  });
+
   test("logging the ChatGPT account out goes to ChatGPT, not Claude Code", () => {
     signOut();
     const before = sb.calls().length;

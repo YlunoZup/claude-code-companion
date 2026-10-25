@@ -230,11 +230,17 @@ function render(accounts, now = Date.now()) {
       boxRow(`         ${c.dim}GPT models in Claude Code, on your ChatGPT plan${c.reset}`);
       const plan = acc.planLimits;
       if (plan && plan.status === "ok" && plan.windows.length) {
+        boxRow(`         ${c.dim}Codex allowance, not ccc's app cap${c.reset}`);
         for (const w of plan.windows) boxRow(`         ${usageRow(w.label, w, now)}`);
         const age = now - plan.fetchedAt;
-        if (age > 5 * 60 * 1000) boxRow(`         ${c.dim}as Codex reported ${usage.formatResetIn(now, plan.fetchedAt).replace(/^in /, "")} ago${c.reset}`);
+        if (plan.stale || age > 2 * 60 * 1000) {
+          const when = age < 60000 ? "just now" : `${usage.formatResetIn(now, plan.fetchedAt).replace(/^in /, "")} ago`;
+          boxRow(`         ${c.dim}cached · ${when}${c.reset}`);
+        }
       } else if (acc.ready) {
-        boxRow(`         ${c.dim}usage: chatgpt.com/settings/usage${c.reset}`);
+        if (plan && plan.status === "account_mismatch") boxRow(`         ${c.yellow}usage hidden: Codex account differs${c.reset}`);
+        else if (plan && plan.status === "codex_signed_out") boxRow(`         ${c.dim}usage: sign Codex into this ChatGPT account${c.reset}`);
+        boxRow(`         ${c.dim}app cap: chatgpt.com/settings/usage${c.reset}`);
       }
       boxRow(blank);
       continue;

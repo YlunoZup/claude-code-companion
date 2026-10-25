@@ -362,6 +362,26 @@ describe("the ChatGPT account (gpt)", () => {
     }
   });
 
+  test("disconnecting during token refresh cannot start a paid model request afterward", async () => {
+    let started;
+    let release;
+    const waiting = new Promise((r) => { started = r; });
+    const token = new Promise((r) => { release = r; });
+    await withRouter("gpt", async (port) => {
+      const before = openai.requests.length;
+      const body = JSON.stringify(messages("gpt-6.1-sol"));
+      const req = http.request({ host: "127.0.0.1", port, method: "POST", path: "/v1/messages", headers: { authorization: `Bearer ${KEY}`, "content-length": Buffer.byteLength(body) } });
+      req.on("error", () => {});
+      req.end(body);
+      await waiting;
+      await new Promise((resolve) => { req.once("close", resolve); req.destroy(); });
+      await new Promise((r) => setTimeout(r, 20));
+      release("refreshed-token");
+      await new Promise((r) => setTimeout(r, 30));
+      assert.equal(openai.requests.length, before);
+    }, { openai, getToken: () => { started(); return token; } });
+  });
+
   test("a request that asks for no streaming gets the whole message as JSON", async () => {
     await withRouter(
       "gpt",
@@ -638,6 +658,48 @@ describe("what Claude Code is started with", () => {
     } finally {
       sb.cleanup();
     }
+  });
+
+  test("keeps GPT effort settings, caps windows, and does not duplicate picker rows", () => {
+    const sb = makeSandbox();
+    try {
+      const ours = router.pickerSettings([{ ...MODELS[0], contextWindow: 500000 }], { mode: "mixed", planLabel: "ChatGPT" });
+      const file = join(sb.root, "merged.json");
+      const theirs = { modelPicker: { options: [{ model: "gpt-6.1-sol", label: "old" }] }, modelSettings: { "gpt-6.1-sol": { effortLevel: "xhigh", maxEffortLevel: "high", autoCompactWindow: 900000 } } };
+      router.withSettings(["--settings", JSON.stringify(theirs)], ours, file);
+      let s = JSON.parse(readFileSync(file, "utf8"));
+      assert.deepEqual(s.modelSettings["gpt-6.1-sol"], { effortLevel: "xhigh", maxEffortLevel: "high", autoCompactWindow: 500000 });
+      assert.equal(s.modelPicker.options.length, 1);
+      theirs.modelSettings["gpt-6.1-sol"].autoCompactWindow = 150000;
+      router.withSettings(["--settings", JSON.stringify(theirs)], ours, file);
+      s = JSON.parse(readFileSync(file, "utf8"));
+      assert.equal(s.modelSettings["gpt-6.1-sol"].autoCompactWindow, 150000);
+    } finally { sb.cleanup(); }
+  });
+
+  test("GPT-only rows still replace Claude rows when user settings supply their own picker", () => {
+    const sb = makeSandbox();
+    try {
+      const ours = router.pickerSettings(MODELS, { mode: "gpt", planLabel: "ChatGPT" });
+      const file = join(sb.root, "merged.json");
+      router.withSettings(["--settings", '{"modelPicker":{"options":[{"model":"opus"}],"replaceBuiltInOptions":false}}'], ours, file);
+      const s = JSON.parse(readFileSync(file, "utf8"));
+      assert.equal(s.modelPicker.replaceBuiltInOptions, true);
+      assert.deepEqual(s.modelPicker.options.map((r) => r.model), MODELS.map((r) => r.id));
+    } finally { sb.cleanup(); }
+  });
+
+  test("invalid settings fail closed rather than dropping permission rules", () => {
+    const sb = makeSandbox();
+    try {
+      const ours = router.pickerSettings(MODELS, { mode: "mixed", planLabel: "ChatGPT" });
+      const file = join(sb.root, "merged.json");
+      for (const value of ['{"permissions":', '[]', join(sb.root, "missing.json")]) assert.throws(() => router.withSettings(["--settings", value], ours, file), /Could not read --settings/);
+      assert.throws(() => router.withSettings(["--settings"], ours, file), /needs a JSON object or file/);
+      assert.equal(existsSync(file), false);
+      assert.throws(() => router.withSettings(["--settings", '{"env":{"TOKEN":"PRIVATE-SETTINGS-VALUE"},broken}'], ours, file), (err) => !err.message.includes("PRIVATE-SETTINGS-VALUE") && /Could not read --settings/.test(err.message));
+      assert.deepEqual(router.withSettings(["--", "--settings", "literal prompt"], ours, file).slice(2), ["--", "--settings", "literal prompt"]);
+    } finally { sb.cleanup(); }
   });
 
   test("the ChatGPT account replaces the Claude login with the router's key and points every model at GPT", () => {

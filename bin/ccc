@@ -220,6 +220,11 @@ case "${1-}" in
         require_runtime
         require_gpt_runtime
         case "${1-}" in
+            sync)
+                require_slot "gpt sync" "${2-}"
+                [[ "$#" -ne 2 ]] && die "Usage: ccc gpt sync <number>"
+                exec node "$PROFILES_LIB" sync-gpt "${2#-}"
+                ;;
             on | off)
                 require_slot "gpt $1" "${2-}"
                 exec node "$PROFILES_LIB" set-gpt "${2#-}" "$1"

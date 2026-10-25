@@ -17,7 +17,7 @@ The statusline appears at the bottom of every Claude Code session and shows whic
 | **Git** | The current branch; hidden outside a repository and on a detached HEAD |
 | **Directory** | The working directory: `~` for home, and only the last two components of anything deeper |
 | **Context** | Context window usage: green below 50%, amber below 80%, red from there |
-| **Limits** | How much of the account's 5-hour and weekly limits is left — the figures the picker shows, which Claude Code passes in. Under a fifth left, it also says when that window resets. Absent for an API key, and until the session's first response. On a [GPT model](#gpt-models) it says `Using ChatGPT plan` instead |
+| **Limits** | The Claude account's 5-hour and weekly allowance left, from Claude Code. Under a fifth left, it also shows the reset time. On a [GPT model](#chatgpt-usage-figures), `ChatGPT · Codex week 96% left` shows Codex-reported limits for a matching account email, not ccc's app cap; cached figures are labeled. Without verified figures it says `Using ChatGPT plan` |
 
 Each segment is white text on its own colour block, so the account is readable at a glance — no need to check config or environment variables. The statusline is a single Node script with no dependencies, so there is nothing else to install.
 
@@ -69,13 +69,14 @@ Run `ccc` to get the interactive picker. Every account shows who it is signed in
 
 ## GPT Models
 
-With a ChatGPT plan, Claude Code can run on the GPT models too. It is still all Claude Code — its screen, tools, slash commands, `CLAUDE.md`, MCP servers and hooks — with a GPT model answering instead of Claude, on your ChatGPT plan's usage. The Codex app and CLI are not involved.
+With a ChatGPT plan, Claude Code can run on the GPT models too. It is still Claude Code — its screen, tools, slash commands, `CLAUDE.md`, configured MCP servers and hooks — with a GPT model answering instead of Claude. Codex is never the coding agent; an installed Codex is used only for the optional [usage lookup](#chatgpt-usage-figures).
 
 ```bash
 ccc gpt login     # sign in with ChatGPT, once; adds an account for the GPT models
 ccc 6             # that account: Claude Code on GPT only (its number is printed at sign-in)
 ccc 2 --gpt       # any Claude account, with the GPT models added to /model
 ccc gpt on 2      # ...on every launch of account 2 (ccc gpt off 2 stops)
+ccc gpt sync 1    # merge account 1's plugins and public MCP setup into the ChatGPT profile
 ccc gpt status    # who is signed in, and which models the plan gives
 ccc gpt models    # the models, refreshed from OpenAI
 ccc gpt logout    # sign ChatGPT out and revoke ccc's access
@@ -83,25 +84,52 @@ ccc gpt logout    # sign ChatGPT out and revoke ccc's access
 
 In `/model` the GPT models appear as rows marked **ChatGPT plan**. On a Claude account they come after the Claude models, and switching back and forth works within one conversation — switch between turns, not while a tool call is running. The effort control works on them too: Claude Code's effort becomes the GPT model's reasoning effort. Claude Code's default is High, while OpenAI's own defaults for these models are lower, so Medium or Low saves plan usage.
 
-On the ChatGPT account, Claude Code's own background requests (session titles and the like) go to the plan's smallest model, and the header reads `API Usage Billing` — Claude Code's name for any login that is not a Claude one; nothing is billed to an API.
+On the ChatGPT account, every model request goes to OpenAI: Claude Code's Haiku helper names map to a smaller GPT model, and other Claude model aliases map to the primary GPT model. The header may read `API Usage Billing`, and `/cost` can show estimates based on the Claude alias's list prices; neither is a billing receipt. GPT requests use ccc's ChatGPT OAuth sign-in, with no API-key fallback. Connected-app credit spending can still cost extra if you enable it in ChatGPT's usage settings; ccc does not inspect or change those purchasing preferences.
 
 ### How it works
 
-`ccc gpt login` is OpenAI's [Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source), which OpenAI opened to open-source tools and personal projects that run locally. You approve `claude-multi-account` once in the browser; its requests then count against your ChatGPT plan, and you can cap or cut off its share at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). The sign-in is ccc's own, kept in `~/.claude-profiles/chatgpt/auth.json` (readable by you alone). It never touches the Codex app's `~/.codex/auth.json`: OpenAI replaces the refresh token on every use, so two programs sharing one login would sign each other out.
+`ccc gpt login` is OpenAI's [Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source), which OpenAI opened to open-source tools and personal projects that run locally. You approve `claude-multi-account` once in the browser; its requests then count against your ChatGPT plan, and you can cap or cut off its share at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). The sign-in is ccc's own, kept in `~/.claude-profiles/chatgpt/auth.json` (readable by you alone). Login/logout persistence and token refresh share a lock so a background refresh cannot restore signed-out credentials or overwrite a newer saved login. It never touches the Codex app's `~/.codex/auth.json`: OpenAI replaces the refresh token on every use, so two programs sharing one login would sign each other out.
 
 A launch with the GPT models starts `router.cjs`, which listens on `127.0.0.1` for as long as that Claude Code runs and is the address Claude Code sends its requests to (`ANTHROPIC_BASE_URL`). By the model each request names:
 
-- **a Claude model** goes on to `api.anthropic.com` byte for byte, with the account's own login — Claude Code's header, which the router passes on and never stores. The rate-limit headers come back the same way, so the picker's and the statusline's figures still work.
-- **a GPT model** is translated to OpenAI's Responses API and back. A GPT model's reasoning rides along in the conversation, so it keeps its train of thought from one turn to the next. Tools Claude Code loads on demand (ToolSearch) become callable as they load, as Anthropic's servers would make them, and a web search runs on OpenAI's.
+- **a Claude model** goes on to `api.anthropic.com` with the account's own login — Claude Code's header, which the router passes on and never stores. The body is unchanged except that GPT-specific encrypted thinking blocks are removed from a conversation switched back to Claude. Claude's rate-limit headers come back unchanged.
+- **a GPT model** is translated to OpenAI's Responses API and back. Its encrypted reasoning is carried in thinking-block signatures when thinking is enabled. Claude's private reasoning is not passed to GPT, nor GPT's to Claude; their visible conversation and tool results do carry over. Tools loaded on demand through ToolSearch become callable, and web search runs on OpenAI's.
 
-The GPT rows reach `/model` through a `modelPicker` setting passed with `--settings`. Each "behaves as" `claude-sonnet-5`, a model Claude Code knows, which gives it the effort control. A per-model auto-compact window then gives each GPT model its own context window — the one OpenAI states and Codex uses: 500K for GPT-6.1-Sol, 272K for the others — so Claude Code compacts the conversation before the model would run out of room, and the statusline measures against that window. A per-session key keeps any other program on the machine from spending your plan through the router. `~/.claude-profiles/chatgpt/router.log` records each GPT request's model, status and token counts, and never a prompt or a token.
+The GPT rows reach `/model` through a `modelPicker` setting passed with `--settings`. Each "behaves as" `claude-sonnet-5` for client-side capabilities, without changing the actual GPT model ID sent to OpenAI. Its auto-compact window is capped at the catalog's stated window: currently 500K for GPT-6.1-Sol and 272K for the other listed models. The statusline uses that GPT window rather than the Claude alias's 1M. This does not unlock 1M or prove full-window recall: catalog metadata, short conversations and compaction have been checked, but a successful full-window sentinel test has not. The router does not silently truncate history.
+
+A per-session key protects the loopback router. `~/.claude-profiles/chatgpt/router.log` records models, reasoning effort, status and reported token counts, never prompts or credentials. For a locally enforced stop sequence, generation is canceled before OpenAI sends final usage; the log marks those totals as incomplete rather than claiming zero usage.
+
+### ChatGPT usage figures
+
+`ccc list`, `ccc gpt status` and the statusline can show limits reported by an installed Codex. ccc calls `account/read` first and requires its ChatGPT email to match ccc's own sign-in before asking `account/rateLimits/read`. Codex handles its own credentials; no coding thread or model turn is started. Discovery checks PATH, supported IDE extensions and the macOS Codex app; `CCC_CODEX_BIN` can select a binary or `none` to disable the lookup.
+
+Plan labels use OpenAI's numbered Pro tiers: `prolite` → **ChatGPT Pro 100**, `pro` → **ChatGPT Pro 200**, and `promax` → **ChatGPT Pro 500**. Plus and Go are shown by name. These are plan names, not a calculation of your regional subscription price or invoice.
+
+These are **Codex-reported limits, not ccc's connected-app cap**. Matching an email does not verify that both apps use the same workspace or usage bucket. Check [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage) for ccc's app-specific allowance, credit spending and purchasing controls. A 5-hour window is shown only if Codex actually reports one; a missing window is not assumed to be full.
+
+The picker and text status command request a fresh snapshot. During GPT sessions the router refreshes after answers, at most once every two minutes. Figures older than that interval, or retained after a temporary failure, are marked cached. A detected account mismatch or signed-out Codex hides the numbers. Snapshots are bound to ccc's sign-in and cleared on login/logout, so an earlier account's usage and plan label cannot carry over.
+
+### Plugins and profile setup
+
+`ccc 1 --gpt` keeps account 1's existing Claude Code setup and adds GPT models. The separate ChatGPT profile starts with its own settings; it does not automatically inherit your plugins or user MCP servers. To merge them once:
+
+```bash
+ccc gpt sync 1
+```
+
+This adds locally installed user plugins, their non-sensitive options, public HTTP/SSE MCP endpoints, and links to local skills, commands, agents, rules and `CLAUDE.md`. Existing target choices win, including disabled plugins and custom instructions. Plugin files are reused from the source profile, so keep that profile's installed files available. Repeat the command for newly added customizations; manage existing plugin versions in the target profile normally.
+
+The merge refuses invalid JSON or a target configuration it detects changing during the operation. It does **not** copy account credentials, inline MCP secrets, permissions, environment variables, user hooks, or Claude-account-synced skills. Skipped configurations are listed. Remote MCP servers may require a separate sign-in through `/mcp`; Claude-hosted connectors and cloud-synced customizations are not guaranteed to be available without a Claude login. Restart the ChatGPT session after syncing.
 
 ### Limits
 
-- **Usage figures.** OpenAI does not report how much of the plan is left on this route, so the picker and statusline cannot show it; [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage) does. When the plan or ccc's share runs out, Claude Code says so with that link.
+- **Usage and billing.** When the plan or ccc's app cap is exhausted, the error links to ChatGPT's usage settings. There is no API-key fallback. Optional connected-app credit spending is controlled in ChatGPT, not by ccc.
+- **Auto mode.** GPT cannot use Anthropic's server-side safeguards. The router explicitly reports that beta as unsupported, allowing Claude Code's own local classifier fallback to evaluate tool calls through GPT. Permission checks are not bypassed; classifier decisions and safety reliability can still differ from Claude's.
 - **Web search** runs on OpenAI's search when a GPT model asks Claude Code's WebSearch tool, so it counts against your ChatGPT plan too. Anthropic's other server-side tools, such as code execution, run on Anthropic's servers, so a GPT model goes without them.
 - **A GPT model saved as the default.** `/model` can save a GPT model as an account's default. `ccc` then adds the GPT models whenever it starts that account, but a plain `claude` cannot run it — which matters only for the default profile, the one `claude` itself opens. `ccc repair` points it out.
-- **Not an Anthropic feature.** Claude Code supports other endpoints through `ANTHROPIC_BASE_URL`, but Anthropic does not support running it on non-Claude models. The GPT models were trained on Codex's tools rather than Claude Code's, so expect the odd rough edge.
+- **History and reasoning.** `/resume` and project memory remain in Claude Code's shared project storage. Long sessions can compact into a summary; shared history does not mean either model receives the other's private reasoning or every original token forever.
+- **Settings.** Explicit `--settings` are merged without discarding per-model effort settings; invalid JSON stops the launch rather than silently dropping permission rules. GPT windows cannot be raised above the catalog limit through those settings.
+- **Not an Anthropic feature.** Claude Code supports other endpoints through `ANTHROPIC_BASE_URL`, but running non-Claude models is an unsupported integration. The underlying model is still GPT, not Claude reasoning, and an identical model does not guarantee identical behavior or reliability in different coding-agent harnesses.
 
 ## How It Works
 

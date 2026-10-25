@@ -231,6 +231,7 @@ function createRouter(opts) {
       for (const [name, value] of Object.entries(upRes.headers)) if (!HOP_BY_HOP.has(name)) out[name] = value;
       res.writeHead(upRes.statusCode, out);
       upRes.pipe(res);
+      upRes.on("error", (err) => res.destroy(err));
       upRes.on("end", () => {
         if (upRes.statusCode >= 400) log({ route: "anthropic", path: target.pathname, status: upRes.statusCode, ms: Date.now() - started });
       });
@@ -356,6 +357,7 @@ function createRouter(opts) {
     }
 
     for (let attempt = 0; attempt < 4; attempt++) {
+      if (aborted) return;
       const { request, names } = translate.toResponsesRequest(body, { model, displayName: info.name, efforts: info.efforts, omit });
       let upRes;
       try {
@@ -470,7 +472,8 @@ function createRouter(opts) {
         status: translator.error ? `${opened ? "stream-error" : "error"} ${translator.error.type}` : 200,
         ms: Date.now() - started,
         request_id: requestId,
-        usage: translator.error ? undefined : translator.message.usage,
+        usage: translator.error || translator.message.stop_reason === "stop_sequence" ? undefined : translator.message.usage,
+        usage_incomplete: translator.message.stop_reason === "stop_sequence" ? true : undefined,
       });
       if (!translator.error) {
         try {
@@ -616,7 +619,12 @@ function withSettings(args, ours, file) {
   const rest = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === "--settings" && i + 1 < args.length) {
+    if (arg === "--") {
+      rest.push(...args.slice(i));
+      break;
+    }
+    if (arg === "--settings") {
+      if (i + 1 === args.length) throw new Error("--settings needs a JSON object or file");
       theirs = args[++i];
       continue;
     }
@@ -626,24 +634,37 @@ function withSettings(args, ours, file) {
     }
     rest.push(arg);
   }
-  let settings = ours;
+  let parsed = {};
   if (theirs !== null) {
-    let parsed = null;
     try {
-      parsed = theirs.trim().startsWith("{") ? JSON.parse(theirs) : JSON.parse(fs.readFileSync(theirs, "utf8"));
-    } catch {}
-    if (parsed && typeof parsed === "object") {
-      const picker = parsed.modelPicker && Array.isArray(parsed.modelPicker.options) ? parsed.modelPicker : null;
-      const their = parsed.modelSettings && typeof parsed.modelSettings === "object" ? parsed.modelSettings : {};
-      settings = {
-        ...parsed,
-        modelPicker: picker ? { ...picker, options: [...picker.options, ...ours.modelPicker.options] } : ours.modelPicker,
-        modelSettings: { ...their, ...ours.modelSettings },
-      };
+      const literal = theirs.trim();
+      const text = literal.startsWith("{") || literal.startsWith("[") ? literal : fs.readFileSync(theirs, "utf8");
+      parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("expected a JSON object");
+    } catch {
+      throw new Error("Could not read --settings: expected an inline JSON object or a readable JSON object file");
     }
   }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+  const picker = parsed.modelPicker || {};
+  const ids = new Set(ours.modelPicker.options.map((row) => row.model));
+  const options = ours.modelPicker.replaceBuiltInOptions ? [] : (picker.options || []).filter((row) => !ids.has(row.model));
+  const modelSettings = { ...parsed.modelSettings };
+  for (const [id, defaults] of Object.entries(ours.modelSettings)) {
+    const existing = modelSettings[id] || {};
+    const window = existing.autoCompactWindow;
+    modelSettings[id] = {
+      ...existing,
+      ...defaults,
+      autoCompactWindow: typeof window === "number" && window >= MIN_WINDOW ? Math.min(window, defaults.autoCompactWindow) : defaults.autoCompactWindow,
+    };
+  }
+  const settings = {
+    ...parsed,
+    modelPicker: { ...picker, ...ours.modelPicker, options: [...options, ...ours.modelPicker.options] },
+    modelSettings,
+  };
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
   return ["--settings", file, ...rest];
 }
 
@@ -799,9 +820,17 @@ async function launch({ mode, args = [], env = process.env, home, claude = "clau
       .catch(() => {})
       .finally(() => (asking = null));
   };
-  if (signedIn.signedIn) refreshLimits();
-
   const key = crypto.randomBytes(24).toString("hex");
+  cleanStaleSessions(p.sessions);
+  const settingsFile = path.join(p.sessions, `${process.pid}-${key.slice(0, 8)}.json`);
+  let finalArgs;
+  try {
+    finalArgs = withSettings(args, pickerSettings(models, { mode, planLabel: signedIn.planLabel }), settingsFile);
+  } catch (err) {
+    warn(err.message);
+    return 1;
+  }
+  if (signedIn.signedIn) refreshLimits();
   const router = createRouter({
     mode,
     key,
@@ -812,10 +841,6 @@ async function launch({ mode, args = [], env = process.env, home, claude = "clau
     onAnswer: refreshLimits,
   });
   const port = await router.listen();
-
-  cleanStaleSessions(p.sessions);
-  const settingsFile = path.join(p.sessions, `${process.pid}-${key.slice(0, 8)}.json`);
-  const finalArgs = withSettings(args, pickerSettings(models, { mode, planLabel: signedIn.planLabel }), settingsFile);
   const cleanup = () => {
     router.close();
     try {

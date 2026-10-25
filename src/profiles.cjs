@@ -486,6 +486,138 @@ function ensureGptAccount({ home, name = "ChatGPT", platform } = {}) {
   return { status: "ok", key, name, created: true, dir };
 }
 
+function syncGptWorkflow({ home, sourceKey, platform } = {}) {
+  const p = paths(home);
+  const read = readConfig(p.config);
+  if (read.status !== "ok") return { status: read.status, error: read.error };
+  const source = read.config.accounts[String(sourceKey)];
+  if (!source || isGptAccount(source)) return { status: "bad-source" };
+  const target = Object.entries(read.config.accounts).find(([, entry]) => isGptAccount(entry));
+  if (!target) return { status: "no-gpt" };
+  const sourceDir = source.configDir ? path.join(p.profiles, source.configDir) : p.claude;
+  const targetDir = target[1].configDir ? path.join(p.profiles, target[1].configDir) : p.claude;
+  if (sourceDir === targetDir) return { status: "bad-source" };
+  const stateFile = (dir) => dir === p.claude ? path.join(p.home, ".claude.json") : path.join(dir, ".claude.json");
+  const files = {
+    sourceSettings: path.join(sourceDir, "settings.json"),
+    targetSettings: path.join(targetDir, "settings.json"),
+    sourcePlugins: path.join(sourceDir, "plugins", "installed_plugins.json"),
+    targetPlugins: path.join(targetDir, "plugins", "installed_plugins.json"),
+    sourceMarkets: path.join(sourceDir, "plugins", "known_marketplaces.json"),
+    targetMarkets: path.join(targetDir, "plugins", "known_marketplaces.json"),
+    sourceState: stateFile(sourceDir),
+    targetState: stateFile(targetDir),
+  };
+  const data = {};
+  const original = {};
+  for (const [key, file] of Object.entries(files)) {
+    const result = readJsonFile(file);
+    if (result.status !== "ok" && result.status !== "missing") return { status: result.status, error: new Error(`Cannot read ${file}: ${result.error.message}`) };
+    data[key] = result.value || {};
+    original[key] = JSON.stringify(data[key]);
+  }
+  const { sourceSettings, targetSettings, sourcePlugins, targetPlugins, sourceMarkets, targetMarkets, sourceState, targetState } = data;
+  const result = { status: "ok", key: target[0], plugins: [], servers: [], linked: [], kept: [], skipped: [] };
+  const enabled = { ...targetSettings.enabledPlugins };
+  const installed = { ...targetPlugins.plugins };
+  for (const [id, value] of Object.entries(sourceSettings.enabledPlugins || {})) {
+    if (value === false) continue;
+    if (Object.hasOwn(enabled, id)) {
+      result.kept.push(id);
+      continue;
+    }
+    const entries = (sourcePlugins.plugins && sourcePlugins.plugins[id]) || [];
+    if (!Array.isArray(entries)) return { status: "invalid", error: new Error(`Invalid plugin installation list for ${id}`) };
+    const available = entries.filter((entry) => entry && entry.scope === "user" && typeof entry.installPath === "string" && path.isAbsolute(entry.installPath) && fs.existsSync(entry.installPath));
+    if (!available.length) {
+      result.skipped.push(`${id}: no local user installation`);
+      continue;
+    }
+    const market = id.slice(id.lastIndexOf("@") + 1);
+    const known = sourceMarkets[market];
+    if (known && targetMarkets[market] && JSON.stringify(known.source) !== JSON.stringify(targetMarkets[market].source)) {
+      result.skipped.push(`${id}: the target uses a different marketplace source`);
+      continue;
+    }
+    if (!Object.hasOwn(targetMarkets, market) && known) {
+      if (!["github", "directory", "file"].includes(known.source && known.source.source) || known.source.headers || known.source.headersHelper) {
+        result.skipped.push(`${id}: add its marketplace in the ChatGPT profile first`);
+        continue;
+      }
+      targetMarkets[market] = known;
+    }
+    enabled[id] = value;
+    if (!Object.hasOwn(installed, id)) installed[id] = available;
+    const options = sourceSettings.pluginConfigs && sourceSettings.pluginConfigs[id] && sourceSettings.pluginConfigs[id].options;
+    if (options) {
+      const existing = targetSettings.pluginConfigs && targetSettings.pluginConfigs[id];
+      targetSettings.pluginConfigs = { ...targetSettings.pluginConfigs, [id]: { ...existing, options: { ...options, ...(existing && existing.options) } } };
+    }
+    result.plugins.push(id);
+  }
+  if (result.plugins.length) {
+    targetSettings.enabledPlugins = enabled;
+    targetPlugins.version = targetPlugins.version || sourcePlugins.version || 2;
+    targetPlugins.plugins = installed;
+  }
+  const servers = { ...targetState.mcpServers };
+  for (const [name, server] of Object.entries(sourceState.mcpServers || {})) {
+    if (!server || typeof server !== "object") return { status: "invalid", error: new Error(`Invalid MCP configuration for ${name}`) };
+    if (Object.hasOwn(servers, name)) {
+      result.kept.push(`MCP ${name}`);
+      continue;
+    }
+    let url;
+    try {
+      url = new URL(server.url);
+    } catch {}
+    if (!["http", "sse"].includes(server.type) || !url || !["http:", "https:"].includes(url.protocol) || url.username || url.password || url.search || url.hash || server.headers || server.headersHelper || server.env || (server.oauth && server.oauth.clientSecret)) {
+      result.skipped.push(`MCP ${name}: re-add it without copying inline credentials`);
+      continue;
+    }
+    const clean = { type: server.type, url: server.url };
+    if (server.oauth) {
+      const { clientId, callbackPort } = server.oauth;
+      if (typeof clientId === "string" || typeof callbackPort === "number") clean.oauth = {
+        ...(typeof clientId === "string" ? { clientId } : {}),
+        ...(typeof callbackPort === "number" ? { callbackPort } : {}),
+      };
+    }
+    servers[name] = clean;
+    result.servers.push(name);
+  }
+  if (result.servers.length) targetState.mcpServers = servers;
+  const targets = ["targetSettings", "targetPlugins", "targetMarkets", "targetState"];
+  for (const key of targets) {
+    const current = readJsonFile(files[key]);
+    if (!["ok", "missing"].includes(current.status) || JSON.stringify(current.value || {}) !== original[key]) {
+      return { status: "changed", error: new Error(`${files[key]} changed during the sync; run the command again`) };
+    }
+  }
+  for (const key of targets) {
+    if (original[key] !== JSON.stringify(data[key])) require("./chatgpt.cjs").writePrivate(files[key], data[key]);
+  }
+  for (const name of ["skills", "commands", "agents", "rules"]) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(path.join(sourceDir, name));
+    } catch {}
+    for (const entry of entries.filter((e) => e !== "synced" && !e.startsWith("."))) {
+      const link = ensureLink(path.join(targetDir, name, entry), path.join(sourceDir, name, entry), platform);
+      if (link.status === "linked") result.linked.push(`${name}/${entry}`);
+      else if (link.status === "exists" || link.status === "already-linked") result.kept.push(`${name}/${entry}`);
+      else result.skipped.push(`${name}/${entry}: could not link it`);
+    }
+  }
+  if (fs.existsSync(path.join(sourceDir, "CLAUDE.md"))) {
+    const link = ensureLink(path.join(targetDir, "CLAUDE.md"), path.join(sourceDir, "CLAUDE.md"), platform);
+    if (link.status === "linked") result.linked.push("CLAUDE.md");
+    else if (link.status === "exists" || link.status === "already-linked") result.kept.push("CLAUDE.md");
+    else result.skipped.push("CLAUDE.md: could not link it");
+  }
+  return result;
+}
+
 // The model a profile starts on when nothing else says, as /model saved it.
 function savedModel(settingsPath) {
   const settings = readJsonFile(settingsPath);
@@ -655,13 +787,16 @@ GPT models, on your ChatGPT plan:
                            Claude Code on the GPT models
   ccc <n> --gpt            start account n with the GPT models added to /model
   ccc gpt on <n>           always add them to account n (ccc gpt off <n> stops)
+  ccc gpt sync <n>         copy account n's plugins and public MCP setup into
+                           the ChatGPT profile, preserving existing choices
   ccc gpt status           show the ChatGPT sign-in and its models
   ccc gpt logout           sign ChatGPT out
 
-Usage is the share of each account's 5-hour and weekly limits still left, live
-from Claude Code. Set CCC_NO_USAGE=1 to skip it and open the picker instantly.
-GPT requests count against your ChatGPT plan instead; manage how much ccc may
-use at https://chatgpt.com/settings/usage
+Claude usage comes live from Claude Code. ChatGPT usage is Codex's allowance,
+shown only for a matching account email; it is not ccc's connected-app cap.
+Set CCC_NO_USAGE=1 to skip lookups and open the picker instantly.
+GPT requests use your ChatGPT plan; manage ccc's cap and optional credit spending
+at https://chatgpt.com/settings/usage
 
 Accounts are listed in ~/.claude-profiles/config.json.`;
 
@@ -686,6 +821,7 @@ const USAGE = `usage: profiles.cjs <command> [args]
   launch-mode <slot> [--gpt]       print how to start a slot: claude, mixed or gpt
   set-gpt <slot> on|off            always add the GPT models to a slot, or stop
   ensure-gpt-account               print the ChatGPT account's slot, adding one
+  sync-gpt <source-slot>            merge plugins and public MCP setup into GPT
   help                             print the help ccc shows for \`ccc help\``;
 
 function fail(message) {
@@ -837,6 +973,20 @@ function main(argv) {
       return 0;
     }
 
+    case "sync-gpt": {
+      if (!/^\d+$/.test(rest[0] || "") || rest.length !== 1) return usage();
+      const result = syncGptWorkflow({ home: p.home, sourceKey: rest[0] });
+      if (result.status === "bad-source") return fail("Choose a configured Claude account as the source. ccc list shows the numbers.");
+      if (result.status === "no-gpt") return fail("Add the ChatGPT profile first with: ccc gpt login");
+      if (result.status !== "ok") return fail(result.error ? result.error.message : "Could not read the account configuration");
+      process.stdout.write(`  ChatGPT account ${result.key}: added ${result.plugins.length} plugins, ${result.servers.length} public MCP configurations, ${result.linked.length} customizations.\n`);
+      process.stdout.write("  Existing choices, credentials, permissions and user hooks were left alone.\n");
+      if (result.servers.length) process.stdout.write("  Remote MCP servers may need their own sign-in through /mcp.\n");
+      for (const item of result.skipped) process.stdout.write(`  Skipped ${item}\n`);
+      process.stdout.write(`  Restart ccc ${result.key} to load the changes.\n`);
+      return 0;
+    }
+
     case "ensure-gpt-account": {
       const result = ensureGptAccount({ home: p.home, name: process.env.CC_ACCOUNT_NAME || "ChatGPT" });
       if (result.status !== "ok") return fail(`Refusing to rewrite ${p.config}: ${result.error.message}`);
@@ -934,6 +1084,7 @@ module.exports = {
   addAccount,
   isGptAccount,
   ensureGptAccount,
+  syncGptWorkflow,
   savedModel,
   launchMode,
   gptModels,

@@ -9,7 +9,7 @@ import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { makeSandbox, stripAnsi, REPO_ROOT } from "./helpers.test.mjs";
+import { makeSandbox, stripAnsi, REPO_ROOT, seedChatgptUsage } from "./helpers.test.mjs";
 
 const require = createRequire(import.meta.url);
 const statusline = require(join(REPO_ROOT, "src", "statusline.js"));
@@ -456,14 +456,14 @@ describe("GPT models", () => {
 
 describe("the ChatGPT plan's usage", () => {
   const limits = (sb, fetchedAt, windows) =>
-    sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), { status: "ok", planType: "pro", windows, fetchedAt });
+    seedChatgptUsage(sb, { status: "ok", planType: "pro", windows, fetchedAt });
 
   test("a GPT model shows how much of the plan is left, as Codex last reported it", () => {
     const sb = makeSandbox();
     try {
       const now = Date.now();
       limits(sb, now - 60000, [{ label: "week", minutes: 10080, used: 4, left: 96, resetsAt: now + 5 * 86400000 }]);
-      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT plan week 96% left");
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT · Codex week 96% left");
     } finally {
       sb.cleanup();
     }
@@ -477,10 +477,24 @@ describe("the ChatGPT plan's usage", () => {
         { label: "5h", minutes: 300, used: 90, left: 10, resetsAt: now + 125 * 60000 },
         { label: "week", minutes: 10080, used: 40, left: 60, resetsAt: now + 3 * 86400000 },
       ]);
-      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT plan 5h 10% left, resets in 2h 5m · week 60% left (45m ago)");
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT · Codex 5h 10% left, resets in 2h 5m · week 60% left (cached; 45m ago)");
     } finally {
       sb.cleanup();
     }
+  });
+
+  test("a mismatched or stale snapshot cannot look like current plan usage", () => {
+    const sb = makeSandbox();
+    try {
+      seedChatgptUsage(sb, { status: "account_mismatch", error: "another account" });
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home })), "Using ChatGPT plan · Codex account differs");
+      const now = Date.now();
+      seedChatgptUsage(sb, { status: "ok", stale: true, fetchedAt: now - 60000, windows: [{ label: "week", left: 96 }] });
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "ChatGPT · Codex week 96% left (cached; 1m ago)");
+      const file = join(sb.profilesDir, "chatgpt", "auth.json");
+      sb.writeJson(file, { ...sb.readJson(file), account: { sub: "different", email: "different@example.com" } });
+      assert.equal(stripAnsi(statusline.chatgptLabel({ home: sb.home, now })), "Using ChatGPT plan");
+    } finally { sb.cleanup(); }
   });
 
   test("with no figures at all it just says which plan pays", () => {

@@ -35,15 +35,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     MCP tools — become callable on a GPT model once loaded, as Anthropic's
     servers would make them, and Claude Code's WebSearch runs on OpenAI's own
     web search.
-  - The picker shows the ChatGPT account, and the statusline says
-    `Using ChatGPT plan` on a GPT model instead of the Claude account's limits.
-    OpenAI reports no usage figures on this route; the picker points at
-    chatgpt.com/settings/usage.
-  - The ChatGPT plan's usage left (weekly, and 5-hour where the plan has one)
-    shows in the picker, `ccc gpt status` and the statusline. OpenAI gives
-    none on this route, so ccc asks the installed Codex (CLI, IDE extension or
-    app) through its own app-server and caches the answer; the router keeps
-    it fresh after GPT answers.
+  - The picker shows the ChatGPT account. GPT sessions show Codex-reported
+    limits when available, otherwise `Using ChatGPT plan`, never the Claude
+    account's leftover limits. Only reported windows appear.
+  - Usage lookup verifies Codex's ChatGPT email against ccc's sign-in before
+    reading limits. Snapshots are bound to that login, refreshed after answers
+    at most every two minutes, and labeled cached on failure or when older.
+    Mismatches and signed-out Codex hide the figures. The display explicitly
+    distinguishes Codex allowance from ccc's connected-app cap.
+  - `ccc gpt sync <n>` merges locally installed plugins, public MCP setup and
+    local customizations from Claude account n into the ChatGPT profile. It
+    preserves target choices, credentials, permissions and user hooks; skips
+    inline secrets and Claude-account-synced skills; and lists what still
+    needs manual setup. Remote MCP sign-ins remain separate.
   - Auto mode works on GPT models: the router turns down Anthropic's
     server-side safety field as an unsupported beta, so Claude Code vets tool
     calls with its own classifier requests, which GPT answers. Requests that
@@ -95,6 +99,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alone, and so is a `settings.json` that does not parse.
 
 ### Fixed
+
+- The ChatGPT picker and status identify Pro 100, Pro 200 and Pro 500 from
+  OpenAI's `prolite`, `pro` and `promax` plan types, rather than a generic Pro
+  label; Plus and Go keep their distinct names.
+- GPT launch settings preserve per-model effort preferences, deduplicate picker
+  rows, and cap context windows. Invalid `--settings` now fails closed instead
+  of silently dropping the user's permission configuration.
+- A client disconnect during ChatGPT token refresh no longer starts a model
+  request after the client has left. Interrupted Claude upstream streams are
+  handled without an unhandled response error. Local stop-sequence cancellation
+  marks token totals incomplete in the router log.
+- Codex usage queries are serialized across ccc processes, support Windows npm
+  shims, and cannot restore an old snapshot after a new ChatGPT login.
+- ChatGPT login/logout persistence shares the refresh lock, preventing a pending
+  refresh from restoring a signed-out session or overwriting a newer login.
+  A delayed logout preserves a newer saved sign-in.
+- Workflow sync detects changed target files before writing rather than knowingly
+  overwriting another session's settings.
+- Test sandboxes strip inherited provider credentials and router environment
+  variables, and default OpenAI endpoints to localhost stand-ins.
 
 - **`install.sh` no longer deletes an existing profile directory.** Re-running the
   installer used to `rm -rf` a real `~/.claude-profiles/account2/projects` and

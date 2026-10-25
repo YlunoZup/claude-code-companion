@@ -17,6 +17,7 @@ const { homedir } = require("os");
 const { join, basename, normalize } = require("path");
 const profiles = require("./profiles.cjs");
 const usage = require("./usage.cjs");
+const chatgpt = require("./chatgpt.cjs");
 
 const HOME = homedir();
 const PROFILES_DIR = join(HOME, ".claude-profiles");
@@ -212,11 +213,11 @@ function isGptModel(id, opts) {
 // A GPT model runs on the ChatGPT plan, so the Claude account's limits say
 // nothing about it: say which plan pays, and how much of it is left as Codex
 // last reported it (ccc's router keeps that fresh while GPT models answer).
-// Figures more than half an hour old say how old they are.
+// Figures older than the refresh interval are labeled as cached.
 function chatgptLabel({ home = HOME, now = Date.now() } = {}) {
-  const cached = profiles.readJsonFile(join(home, ".claude-profiles", "chatgpt", "limits.json"));
-  const limits = cached.status === "ok" && cached.value.status === "ok" ? cached.value : null;
-  const windows = limits && Array.isArray(limits.windows) ? limits.windows.filter((w) => w && typeof w.left === "number") : [];
+  const limits = chatgpt.cachedPlanLimits({ home });
+  if (limits && limits.status === "account_mismatch") return `${DIM}Using ChatGPT plan · Codex account differs${RESET}`;
+  const windows = limits && limits.status === "ok" ? limits.windows.filter((w) => w && Number.isFinite(w.left)) : [];
   if (windows.length === 0) return `${DIM}Using ChatGPT plan${RESET}`;
   const parts = windows.map((w) => {
     const left = Math.round(Math.min(100, Math.max(0, w.left)));
@@ -229,8 +230,9 @@ function chatgptLabel({ home = HOME, now = Date.now() } = {}) {
     return text;
   });
   const age = now - limits.fetchedAt;
-  const stale = age > 30 * 60 * 1000 ? `${DIM} (${usage.formatResetIn(now, limits.fetchedAt).replace(/^in /, "")} ago)${RESET}` : "";
-  return `${DIM}ChatGPT plan${RESET} ${parts.join(`${DIM} · ${RESET}`)}${stale}`;
+  const when = age < 60000 ? "just now" : `${usage.formatResetIn(now, limits.fetchedAt).replace(/^in /, "")} ago`;
+  const stale = limits.stale || age > 2 * 60 * 1000 ? `${DIM} (cached; ${when})${RESET}` : "";
+  return `${DIM}ChatGPT · Codex${RESET} ${parts.join(`${DIM} · ${RESET}`)}${stale}`;
 }
 
 // ── Rendering ────────────────────────────────────────────────
