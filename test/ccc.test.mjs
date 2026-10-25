@@ -459,6 +459,7 @@ describe("ccc help", () => {
         sb.install();
         const r = sb.ccc([flag]);
         assert.equal(r.status, 0, r.stderr);
+        assert.match(r.stdout, /^ccc — Claude Code Companion/);
         assert.match(r.stdout, /ccc login <n>/);
         assert.match(r.stdout, /ccc repair \[n\]/);
         assert.deepEqual(sb.calls(), []);

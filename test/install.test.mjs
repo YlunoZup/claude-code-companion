@@ -17,6 +17,7 @@ describe("install.sh", () => {
     try {
       const r = sb.install();
       assert.equal(r.status, 0, r.stderr);
+      assert.match(r.stdout, /Claude Code Companion installer/);
 
       const files = ["profiles.cjs", "picker.mjs", "usage.cjs", "statusline.js", "config.json", "package.json"];
       // The GPT support: picker.mjs imports chatgpt.cjs, so it is not optional.

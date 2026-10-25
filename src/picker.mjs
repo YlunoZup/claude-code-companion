@@ -191,8 +191,8 @@ function render(accounts, now = Date.now()) {
   log("");
   log(`  ${c.dim}${c.cyan}┏${line}┓${c.reset}`);
   boxRow(blank);
-  boxRow(`   ${c.orange}${c.bold}◆${c.reset}  ${c.white}${c.bold}Claude Code${c.reset}`);
-  boxRow(`      ${c.dim}Account Switcher${c.reset}`);
+  boxRow(`   ${c.orange}${c.bold}◆${c.reset}  ${c.white}${c.bold}Claude Code Companion${c.reset}`);
+  boxRow(`      ${c.dim}Accounts · models · usage${c.reset}`);
   boxRow(blank);
   log(`  ${c.dim}${c.cyan}┣${line}┫${c.reset}`);
   boxRow(blank);

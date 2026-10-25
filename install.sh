@@ -1,5 +1,5 @@
 #!/bin/bash
-# claude-multi-account installer
+# Claude Code Companion installer
 # Works on macOS, Linux, and Windows (Git Bash / MSYS2)
 
 set -e
@@ -33,7 +33,7 @@ if [[ "${OSTYPE-}" == "msys" || "${OSTYPE-}" == "cygwin" || "${OSTYPE-}" == "win
 fi
 
 echo ""
-printf '  %b%bclaude-multi-account installer%b\n' "$CYAN" "$BOLD" "$RESET"
+printf '  %b%bClaude Code Companion installer%b\n' "$CYAN" "$BOLD" "$RESET"
 printf '  %b────────────────────────────────%b\n' "$DIM" "$RESET"
 echo ""
 

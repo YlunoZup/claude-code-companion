@@ -45,6 +45,7 @@ describe("install.bat", { skip }, () => {
     try {
       const r = cmd(sb, join(REPO_ROOT, "install.bat"));
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+      assert.match(r.stdout, /Claude Code Companion installer/);
 
       for (const f of ["profiles.cjs", "picker.mjs", "statusline.js", "config.json", "package.json"]) {
         assert.ok(existsSync(join(sb.profilesDir, f)), `missing ${f}`);
@@ -373,7 +374,7 @@ describe("ccc.bat commands", { skip }, () => {
   test("list prints the overview without a prompt", () => {
     const r = cmd(sb, ccc, ["list"]);
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
-    assert.match(r.stdout, /Account Switcher/);
+    assert.match(r.stdout, /Claude Code Companion/);
     assert.doesNotMatch(r.stderr, /Select account/);
   });
 

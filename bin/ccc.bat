@@ -1,5 +1,5 @@
 @echo off
-:: Claude Code Account Switcher (Windows CMD)
+:: Claude Code Companion (Windows CMD)
 :: Usage: ccc [args...]        - pick an account (who it is signed in as, live usage)
 ::        ccc N [args...]      - launches directly with Account N
 ::        ccc N --gpt [args]   - the same, with the GPT models added to /model

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Claude Code Account Switcher
+# Claude Code Companion
 # Usage: ccc [args...]        - pick an account (who it is signed in as, live usage)
 #        ccc N [args...]      - launch directly with Account N
 #        ccc N --gpt [args]   - the same, with the GPT models added to /model

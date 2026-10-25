@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
 
-:: claude-multi-account installer for Windows CMD
+:: Claude Code Companion installer for Windows CMD
 
 echo.
-echo   claude-multi-account installer
+echo   Claude Code Companion installer
 echo   --------------------------------
 echo.
 

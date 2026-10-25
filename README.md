@@ -1,13 +1,15 @@
-# claude-multi-account
+# Claude Code Companion
 
-Multi-account switching and an account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Switch between Claude accounts with one command, see which Claude account each one is signed into, and how much of its 5-hour and weekly limits is left — live. With a ChatGPT plan, the GPT models run in Claude Code too, picked in `/model` like any other.
+**Claude Code Companion** (`ccc`) is an unofficial launcher and account-aware statusline for [Claude Code](https://docs.anthropic.com/en/docs/claude-code), not an Anthropic product. Switch between Claude accounts with one command, see which Claude account each one is signed into, and how much of its 5-hour and weekly limits is left — live. With a ChatGPT plan, the GPT models run in Claude Code too, picked in `/model` like any other.
+
+Previously named `claude-multi-account`; the command remains `ccc`, and existing profiles, sign-ins, shared history and memory stay in place.
 
 ## Statusline
 
 The statusline appears at the bottom of every Claude Code session and shows which account you are in, what the session is doing, and how much of the account's limits is left:
 
 ```
- Account 1 (Personal)  Opus 4.1   main  ~/code/claude-multi-account   ctx 74k/200k (37%)  5h 77% left · week 40% left
+ Account 1 (Personal)  Opus 4.1   main  ~/code/claude-code-companion   ctx 74k/200k (37%)  5h 77% left · week 40% left
 ```
 
 | Segment | What it shows |
@@ -29,8 +31,8 @@ Run `ccc` to get the interactive picker. Every account shows who it is signed in
 
   ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
   ┃                                                          ┃
-  ┃   ◆  Claude Code                                         ┃
-  ┃      Account Switcher                                    ┃
+  ┃   ◆  Claude Code Companion                               ┃
+  ┃      Accounts · models · usage                           ┃
   ┃                                                          ┃
   ┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┫
   ┃                                                          ┃
@@ -88,7 +90,7 @@ On the ChatGPT account, every model request goes to OpenAI: Claude Code's Haiku 
 
 ### How it works
 
-`ccc gpt login` is OpenAI's [Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source), which OpenAI opened to open-source tools and personal projects that run locally. You approve `claude-multi-account` once in the browser; its requests then count against your ChatGPT plan, and you can cap or cut off its share at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). The sign-in is ccc's own, kept in `~/.claude-profiles/chatgpt/auth.json` (readable by you alone). Login/logout persistence and token refresh share a lock so a background refresh cannot restore signed-out credentials or overwrite a newer saved login. It never touches the Codex app's `~/.codex/auth.json`: OpenAI replaces the refresh token on every use, so two programs sharing one login would sign each other out.
+`ccc gpt login` is OpenAI's [Sign in with ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source), which OpenAI opened to open-source tools and personal projects that run locally. You approve **Claude Code Companion** once in the browser (existing registrations may still show `claude-multi-account`); its requests then count against your ChatGPT plan, and you can cap or cut off its share at [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage). The sign-in is ccc's own, kept in `~/.claude-profiles/chatgpt/auth.json` (readable by you alone). Login/logout persistence and token refresh share a lock so a background refresh cannot restore signed-out credentials or overwrite a newer saved login. It never touches the Codex app's `~/.codex/auth.json`: OpenAI replaces the refresh token on every use, so two programs sharing one login would sign each other out.
 
 A launch with the GPT models starts `router.cjs`, which listens on `127.0.0.1` for as long as that Claude Code runs and is the address Claude Code sends its requests to (`ANTHROPIC_BASE_URL`). By the model each request names:
 
@@ -177,8 +179,8 @@ Set `CCC_NO_USAGE=1` to leave usage out and open the picker instantly.
 ## Install
 
 ```bash
-git clone https://github.com/YlunoZup/claude-multi-account.git
-cd claude-multi-account
+git clone https://github.com/YlunoZup/claude-multi-account.git claude-code-companion
+cd claude-code-companion
 ```
 
 **macOS / Linux / Git Bash:**
@@ -329,7 +331,7 @@ Because `projects/` is shared, `/resume` in one account lists sessions started u
 ## Project Structure
 
 ```
-claude-multi-account/
+claude-code-companion/
 ├── README.md
 ├── LICENSE
 ├── .gitignore

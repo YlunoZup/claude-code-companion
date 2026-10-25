@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Renamed the project to **Claude Code Companion** across the picker, help,
+  installers, package metadata and new ChatGPT registrations. `ccc`, existing
+  profile paths, sign-ins and shared history are unchanged.
+
 ### Added
 
 - **GPT models in Claude Code, on a ChatGPT plan.** `ccc gpt login` signs in

@@ -281,7 +281,7 @@ function createRouter(opts) {
             accept: "text/event-stream",
             "accept-encoding": "identity",
             "content-length": Buffer.byteLength(body),
-            "user-agent": "claude-multi-account (ccc router)",
+            "user-agent": "claude-code-companion (ccc router)",
           },
         },
         resolve

@@ -766,7 +766,7 @@ function repairAccount(key, entry, { home, platform, earlier = [] } = {}) {
 
 // ── What `ccc help` prints ───────────────────────────────────
 
-const HELP = `ccc — Claude Code with any of your accounts
+const HELP = `ccc — Claude Code Companion
 
   ccc                      pick an account: who it is signed in as, and its live usage
   ccc <n> [claude args]    start Claude Code with account n, e.g.  ccc 2 -c

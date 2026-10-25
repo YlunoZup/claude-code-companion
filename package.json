@@ -1,8 +1,8 @@
 {
-  "name": "claude-multi-account",
+  "name": "claude-code-companion",
   "version": "0.1.0",
   "private": true,
-  "description": "Multi-account switching and an account-aware statusline for Claude Code",
+  "description": "An unofficial Claude Code companion for accounts, GPT models, and usage visibility",
   "license": "MIT",
   "repository": {
     "type": "git",

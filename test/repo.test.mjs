@@ -76,6 +76,12 @@ describe("shell syntax", () => {
 });
 
 describe("packaging", () => {
+  test("the package and documentation use the companion name", () => {
+    assert.equal(JSON.parse(read("package.json")).name, "claude-code-companion");
+    assert.match(read("README.md"), /^# Claude Code Companion\n/);
+    assert.match(read("README.md"), /unofficial/);
+  });
+
   // statusline.js is CommonJS. Declaring the repo as ESM would break it here
   // while leaving the installed copy working — a CI result that lies.
   test("package.json does not declare the project as ESM", () => {

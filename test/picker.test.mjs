@@ -44,8 +44,8 @@ describe("stdout contract", () => {
       sb.writeJson(sb.configPath, { accounts: { 1: { name: "One", configDir: null } } });
       const r = sb.node("src/picker.mjs", [], {}, "1\n");
 
-      assert.match(r.stderr, /Account Switcher/);
-      assert.doesNotMatch(r.stdout, /Account Switcher/);
+      assert.match(r.stderr, /Claude Code Companion/);
+      assert.doesNotMatch(r.stdout, /Claude Code Companion/);
       assert.equal(r.stdout.includes("\n"), false, "stdout must be a bare number");
     } finally {
       sb.cleanup();
@@ -327,7 +327,7 @@ describe("live usage", () => {
       const r = sb.node("src/picker.mjs", [], {}, "r\nq\n");
       assert.equal(r.status, 0, r.stderr);
       assert.equal(usageCalls(sb).length, 2);
-      assert.equal((stripAnsi(r.stderr).match(/Account Switcher/g) || []).length, 2, "drawn again");
+      assert.equal((stripAnsi(r.stderr).match(/Claude Code Companion/g) || []).length, 2, "drawn again");
     } finally {
       sb.cleanup();
     }
@@ -368,7 +368,7 @@ describe("--list", () => {
       const r = sb.node("src/picker.mjs", ["--list"], {}, "");
 
       assert.equal(r.status, 0, r.stderr);
-      assert.match(r.stdout, /Account Switcher/);
+      assert.match(r.stdout, /Claude Code Companion/);
       assert.match(r.stdout, /40% left/);
       assert.doesNotMatch(r.stderr, /Select account/);
     } finally {

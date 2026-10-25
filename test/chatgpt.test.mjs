@@ -226,7 +226,7 @@ describe("signing in", () => {
 
       const q = openai.log.find((e) => e.kind === "authorize").query;
       assert.equal(q.client_id, "dynamic_agent_client");
-      assert.equal(q.agent_name_hint, "claude-multi-account");
+      assert.equal(q.agent_name_hint, "Claude Code Companion");
       assert.match(q.ext_agent_host_id, /^urn:uuid:[0-9a-f-]{36}$/);
       assert.equal(q.response_type, "code");
       assert.equal(q.scope, "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct");
@@ -693,6 +693,7 @@ rl.on("line", (line) => {
       assert.equal(result.status, "ok");
       const sent = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
       assert.deepEqual(sent.map((m) => m.method), ["initialize", "initialized", "account/read", "account/rateLimits/read"]);
+      assert.equal(sent[0].params.clientInfo.title, "Claude Code Companion");
       assert.deepEqual(sent[2].params, { refreshToken: false });
     } finally {
       sb.cleanup();

@@ -33,7 +33,7 @@ const API_BASE = (process.env.CCC_OPENAI_API_URL || "https://api.openai.com/v1")
 const RESOURCE = "https://api.openai.com/v1";
 const PLAN_SCOPE = "chatgpt.tokens.use.direct";
 const SCOPE = `openid profile email offline_access resource.invoke ${PLAN_SCOPE}`;
-const AGENT_NAME = "claude-multi-account";
+const AGENT_NAME = "Claude Code Companion";
 const CALLBACK_PATH = "/auth/callback";
 const PREFERRED_PORT = 1455;
 const USAGE_URL = "https://chatgpt.com/settings/usage";
@@ -578,7 +578,7 @@ function askCodex({ command, args = ["app-server"], expectedEmail, timeoutMs = 1
         }
       }
     });
-    send({ method: "initialize", id: 1, params: { clientInfo: { name: "ccc", title: "claude-multi-account", version: "0.1.0" } } });
+    send({ method: "initialize", id: 1, params: { clientInfo: { name: "ccc", title: AGENT_NAME, version: "0.1.0" } } });
   });
 }
 
@@ -916,7 +916,7 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
       else if (result.revoked) say("Signed ChatGPT out and revoked ccc's access.");
       else {
         say("Signed ChatGPT out here, but OpenAI did not confirm the access was revoked.");
-        say("To make sure, disconnect claude-multi-account in ChatGPT's settings.");
+        say("To make sure, disconnect ccc in ChatGPT's settings (Claude Code Companion, or the earlier claude-multi-account name).");
       }
       return 0;
     }
