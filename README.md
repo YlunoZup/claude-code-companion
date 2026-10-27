@@ -109,7 +109,7 @@ Plan labels use OpenAI's numbered Pro tiers: `prolite` → **ChatGPT Pro 100**, 
 
 These are **Codex-reported limits, not ccc's connected-app cap**. Matching an email does not verify that both apps use the same workspace or usage bucket. Check [chatgpt.com/settings/usage](https://chatgpt.com/settings/usage) for ccc's app-specific allowance, credit spending and purchasing controls. A 5-hour window is shown only if Codex actually reports one; a missing window is not assumed to be full.
 
-The picker and text status command request a fresh snapshot. During GPT sessions the router refreshes after answers, at most once every two minutes. Figures older than that interval, or retained after a temporary failure, are marked cached. A detected account mismatch or signed-out Codex hides the numbers. Snapshots are bound to ccc's sign-in and cleared on login/logout, so an earlier account's usage and plan label cannot carry over.
+The picker and text status command request a fresh snapshot. During GPT sessions the router refreshes after answers, at most once every two minutes. The statusline also starts a background refresh when its verified snapshot is missing or due; it never waits for Codex, and failed lookups share the same cooldown. Figures older than that interval, or retained after a temporary failure, are marked cached. A detected account mismatch or signed-out Codex hides the numbers. Snapshots are bound to ccc's sign-in and cleared on login/logout, so an earlier account's usage and plan label cannot carry over. The verified cache is separate from older routers' unverified snapshots, so sessions left running across an upgrade cannot overwrite it.
 
 ### Plugins and profile setup
 
@@ -211,6 +211,8 @@ bash install.sh /usr/local/bin
 
 ## Usage
 
+**Account launches bypass tool approvals by default** (`--dangerously-skip-permissions`), whether you use `ccc 1`, `ccc -1`, or select an account in the picker, including GPT and mixed sessions. Use this only in trusted projects. An explicit `--permission-mode` is honored instead, for example `ccc 1 --permission-mode plan`; running `claude` directly keeps its usual defaults. Management commands such as login/logout are unchanged, and Claude Code's own first-use bypass warning and managed restrictions still apply.
+
 ```bash
 # Open the interactive account picker
 ccc
@@ -221,7 +223,7 @@ ccc 2        # Account 2
 ccc 3        # Account 3 (if configured)
 
 # Pass any Claude Code flags after the account number
-ccc 2 --dangerously-skip-permissions
+ccc 2 --permission-mode plan  # explicitly choose a different permission mode
 ccc 1 -c    # continue mode
 ccc 3 -r "fix the bug in auth.ts"
 

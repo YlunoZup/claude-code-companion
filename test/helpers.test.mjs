@@ -185,7 +185,7 @@ export function seedChatgptUsage(sb, limits) {
   const auth = { client_id: "oaiapp_fixture", login_id: "fixture-login", account: { sub: "fixture-user", email: "me@example.com" }, refresh_token: "fixture-refresh", plan_usage: true };
   const accountKey = createHash("sha256").update(JSON.stringify([auth.client_id, auth.account.sub, auth.account.email, auth.login_id])).digest("hex");
   sb.writeJson(join(sb.profilesDir, "chatgpt", "auth.json"), auth);
-  sb.writeJson(join(sb.profilesDir, "chatgpt", "limits.json"), { source: "codex", accountKey, checkId: "fixture-check", ...limits });
+  sb.writeJson(join(sb.profilesDir, "chatgpt", "limits-v2.json"), { source: "codex", accountKey, checkId: "fixture-check", ...limits });
 }
 
 // A stub that logs its name, CLAUDE_CONFIG_DIR and arguments instead of doing

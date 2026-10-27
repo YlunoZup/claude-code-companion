@@ -25,7 +25,7 @@ const GIT_TIMEOUT = 60000;
  * Debug is on so a failed assertion reports why, not just that.
  */
 function runStatusline(sb, session, configDir) {
-  const env = { CCC_STATUSLINE_DEBUG: "1" };
+  const env = { CCC_STATUSLINE_DEBUG: "1", CCC_NO_USAGE: "1" };
   if (configDir) env.CLAUDE_CONFIG_DIR = configDir;
   const input = typeof session === "string" ? session : JSON.stringify(session);
   return sb.node("src/statusline.js", [], env, input);

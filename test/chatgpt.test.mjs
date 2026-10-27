@@ -807,6 +807,95 @@ rl.on("line", (line) => {
     }
   });
 
+  test("an older running router cannot overwrite the verified usage cache", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const first = await chatgpt.planLimits({ home: sb.home, env: codexEnv(sb) });
+      const legacy = join(chatgpt.paths(sb.home).dir, "limits.json");
+      sb.writeJson(legacy, { status: "ok", planType: "promax", windows: [{ label: "week", left: 1 }], fetchedAt: Date.now() });
+      assert.deepEqual(chatgpt.cachedPlanLimits({ home: sb.home }), first);
+      assert.equal(chatgpt.status({ home: sb.home }).planLabel, "ChatGPT Pro 200");
+    } finally { sb.cleanup(); }
+  });
+
+  test("failed lookups share the cooldown, without making retained figures look fresh", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const p = chatgpt.paths(sb.home);
+      const first = await chatgpt.planLimits({ home: sb.home, env: { ...sb.env, CCC_CODEX_BIN: "none" } });
+      assert.equal(first.status, "unavailable");
+      const env = codexEnv(sb);
+      assert.deepEqual(await chatgpt.planLimits({ home: sb.home, env }), first);
+      const good = await chatgpt.planLimits({ home: sb.home, env, maxAgeMs: 0 });
+      const fetchedAt = Date.now() - 10 * 60000;
+      sb.writeJson(p.limits, { ...good, fetchedAt, checkedAt: fetchedAt });
+      const stale = await chatgpt.planLimits({ home: sb.home, env: { ...env, CCC_CODEX_BIN: "none" } });
+      assert.equal(stale.stale, true);
+      assert.equal(stale.fetchedAt, fetchedAt);
+      assert.ok(stale.checkedAt > fetchedAt);
+      assert.deepEqual(await chatgpt.planLimits({ home: sb.home, env }), stale);
+    } finally { sb.cleanup(); }
+  });
+
+  test("background refresh is detached, bounded by cache age, and skips disabled or in-flight lookups", async () => {
+    const sb = fresh();
+    try {
+      const calls = [];
+      let unreferenced = 0;
+      const spawnProcess = (...args) => {
+        calls.push(args);
+        return { on() {}, unref() { unreferenced++; } };
+      };
+      const opts = { home: sb.home, env: { ...sb.env, CCC_NO_USAGE: "" }, spawnProcess };
+      assert.equal(chatgpt.refreshPlanLimitsInBackground(opts), false, "no identifiable sign-in");
+      await signIn(sb.home);
+      assert.equal(chatgpt.refreshPlanLimitsInBackground({ ...opts, env: { ...opts.env, CCC_NO_USAGE: "1" } }), false);
+      assert.equal(chatgpt.refreshPlanLimitsInBackground(opts), true);
+      assert.equal(unreferenced, 1);
+      const [command, args, options] = calls[0];
+      assert.equal(command, process.execPath);
+      assert.deepEqual(args, [join(REPO_ROOT, "src", "chatgpt.cjs"), "status", "--json", "--refresh"]);
+      assert.equal(options.stdio, "ignore");
+      assert.equal(options.detached, true);
+      assert.equal(options.windowsHide, true);
+      assert.equal(options.env.HOME, sb.home);
+      assert.equal(options.env.USERPROFILE, sb.home);
+      const p = chatgpt.paths(sb.home);
+      require("node:fs").mkdirSync(p.limitsLock);
+      assert.equal(chatgpt.refreshPlanLimitsInBackground(opts), false, "a lookup already owns the lock");
+      require("node:fs").rmdirSync(p.limitsLock);
+      const limits = await chatgpt.planLimits({ home: sb.home, env: opts.env });
+      assert.equal(limits.status, "unavailable");
+      assert.equal(chatgpt.refreshPlanLimitsInBackground(opts), false, "recent failures do not fork on every paint");
+      assert.equal(chatgpt.refreshPlanLimitsInBackground({ ...opts, now: limits.checkedAt + 120001 }), true);
+      assert.equal(calls.length, 2);
+    } finally { sb.cleanup(); }
+  });
+
+  test("the statusline repairs a missing verified snapshot without a router or model turn", async () => {
+    const sb = fresh();
+    try {
+      await signIn(sb.home);
+      const env = codexEnv(sb, { CODEX_STUB_LOG: join(sb.root, "protocol.log"), CCC_NO_USAGE: "" });
+      const session = JSON.stringify({ model: { id: "gpt-6.1-sol", display_name: "GPT-6.1-Sol" } });
+      const first = sb.node("src/statusline.js", [], env, session);
+      assert.equal(first.status, 0, first.stderr);
+      assert.match(first.stdout, /Using ChatGPT plan/);
+      const deadline = Date.now() + 10000;
+      while (!chatgpt.cachedPlanLimits({ home: sb.home }) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 10));
+      const limits = chatgpt.cachedPlanLimits({ home: sb.home });
+      assert.equal(limits && limits.status, "ok", "the detached worker did not publish a verified snapshot");
+      const second = sb.node("src/statusline.js", [], env, session);
+      assert.equal(second.status, 0, second.stderr);
+      assert.match(second.stdout, /96% left/);
+      const sent = readFileSync(env.CODEX_STUB_LOG, "utf8").trim().split("\n").map(JSON.parse);
+      assert.deepEqual(sent.map((m) => m.method), ["initialize", "initialized", "account/read", "account/rateLimits/read"]);
+      assert.equal(openai.count("models"), 0);
+    } finally { sb.cleanup(); }
+  });
+
   test("a mismatched Codex sign-in invalidates cached figures and its plan label", async () => {
     const sb = fresh();
     try {

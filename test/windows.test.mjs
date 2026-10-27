@@ -170,8 +170,38 @@ describe("ccc.bat", { skip }, () => {
   after(() => sb.cleanup());
 
   test("slot 1 launches the default profile with no CLAUDE_CONFIG_DIR", () => {
-    cmd(sb, ccc, ["1"]);
+    const r = cmd(sb, ccc, ["1"]);
+    assert.equal(r.status, 0, r.stderr);
     assert.equal(lastClaudeCall(sb).configDir, "");
+    assert.equal(lastClaudeCall(sb).args.trim(), "--dangerously-skip-permissions");
+  });
+
+  test("ccc -1 defaults to bypass mode too", () => {
+    const r = cmd(sb, ccc, ["-1"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastClaudeCall(sb).configDir, "");
+    assert.equal(lastClaudeCall(sb).args.trim(), "--dangerously-skip-permissions");
+  });
+
+  for (const [name, args, expected] of [
+    ["an existing bypass flag", ["-c", "--dangerously-skip-permissions"], "-c --dangerously-skip-permissions"],
+    ["an explicit planning mode", ["--permission-mode", "plan", "-c"], "--permission-mode plan -c"],
+    ["an explicit manual mode", ["--permission-mode", "manual"], "--permission-mode manual"],
+    ["an equals-style permission mode", ["--permission-mode=plan"], "--permission-mode=plan"],
+    ["a permission-looking positional argument", ["--", "--permission-mode"], "--dangerously-skip-permissions -- --permission-mode"],
+  ]) {
+    test(`preserves ${name}`, () => {
+      const r = cmd(sb, ccc, ["2", ...args]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(lastClaudeCall(sb).args.trim(), expected);
+    });
+  }
+
+  test("permission-option text inside a quoted prompt does not select a mode", () => {
+    const r = cmd(sb, ccc, ["2", "--append-system-prompt", "Document --permission-mode without changing modes."]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(lastClaudeCall(sb).args, /^--dangerously-skip-permissions /);
+    assert.ok(lastClaudeCall(sb).args.includes("Document --permission-mode without changing modes."));
   });
 
   test("slot 2 points at the account2 profile", () => {
@@ -189,7 +219,19 @@ describe("ccc.bat", { skip }, () => {
   test("more than nine arguments are all forwarded", () => {
     const args = Array.from({ length: 11 }, (_, i) => `--a${i + 1}`);
     cmd(sb, ccc, ["2", ...args]);
-    assert.equal(lastClaudeCall(sb).args, args.join(" "));
+    assert.equal(lastClaudeCall(sb).args, `--dangerously-skip-permissions ${args.join(" ")}`);
+  });
+
+  test("picking an account also defaults to bypass mode", () => {
+    const r = cmd(sb, ccc, [], "2\n");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastClaudeCall(sb).args.trim(), "--dangerously-skip-permissions");
+  });
+
+  test("an explicit permission mode survives the picker", () => {
+    const r = cmd(sb, ccc, ["--permission-mode", "plan"], "2\n");
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(lastClaudeCall(sb).args.trim(), "--permission-mode plan");
   });
 
   // endlocal-then-set used to write the variable into the caller's session, so
@@ -512,7 +554,7 @@ describe("ccc.bat and the GPT models", { skip }, () => {
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const call = lastClaudeCall(sb);
     assert.equal(call.configDir, join(sb.profilesDir, "account6"));
-    assert.match(plain(call.args), /^--settings \S+\.json -c$/);
+    assert.match(plain(call.args), /^--settings \S+\.json --dangerously-skip-permissions -c$/);
   });
 
   test("--gpt adds the GPT models to a Claude account, and never reaches claude", () => {
@@ -521,6 +563,18 @@ describe("ccc.bat and the GPT models", { skip }, () => {
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     const call = lastClaudeCall(sb);
     assert.equal(call.configDir, join(sb.profilesDir, "account2"));
-    assert.match(plain(call.args), /^--settings \S+\.json\s+-c$/);
+    assert.match(plain(call.args), /^--settings \S+\.json\s+--dangerously-skip-permissions -c$/);
   });
+
+  for (const [name, args] of [
+    ["GPT", ["6", "--permission-mode", "plan", "-c"]],
+    ["mixed", ["2", "--gpt", "--permission-mode", "plan", "-c"]],
+  ]) {
+    test(`an explicit permission mode survives ${name} routing`, () => {
+      signIn();
+      const r = cmd(sb, ccc, args);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(plain(lastClaudeCall(sb).args), /^--settings \S+\.json\s+--permission-mode plan -c$/);
+    });
+  }
 });

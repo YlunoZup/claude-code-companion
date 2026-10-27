@@ -781,6 +781,9 @@ const HELP = `ccc — Claude Code Companion
 
   Also: relogin = login, ls = list, rm = remove.
 
+Account launches bypass tool approvals by default (--dangerously-skip-permissions).
+Use only in trusted projects. An explicit --permission-mode is honored instead.
+
 GPT models, on your ChatGPT plan:
 
   ccc gpt login            sign in with ChatGPT; adds an account that runs

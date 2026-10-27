@@ -9,9 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Account launches now default to `--dangerously-skip-permissions`, including
+  direct numbers, leading-dash numbers, picker selections, and GPT/mixed
+  sessions. An explicit permission mode is preserved; management commands and
+  profile permission settings are unchanged. Use only in trusted projects.
 - Renamed the project to **Claude Code Companion** across the picker, help,
   installers, package metadata and new ChatGPT registrations. `ccc`, existing
   profile paths, sign-ins and shared history are unchanged.
+
+### Fixed
+
+- ChatGPT usage percentages no longer disappear when a router left running
+  across an upgrade writes an older cache format. Verified snapshots have a
+  separate cache, and the statusline refreshes them in the background without
+  blocking; failed lookups respect the two-minute cooldown too.
 
 ### Added
 

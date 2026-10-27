@@ -32,6 +32,7 @@ describe("ccc <number>", () => {
     const r = sb.ccc(["1"]);
     assert.equal(r.status, 0, r.stderr);
     assert.equal(lastCall(sb).configDir, "<unset>");
+    assert.equal(lastCall(sb).args, "--dangerously-skip-permissions");
   });
 
   test("slot 2 points at the account2 profile", () => {
@@ -64,8 +65,29 @@ describe("ccc <number>", () => {
   test("more than nine arguments are all forwarded", () => {
     const args = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11"].map((n) => `--a${n}`);
     sb.ccc(["2", ...args]);
-    assert.equal(lastCall(sb).args, args.join(" "));
+    assert.equal(lastCall(sb).args, `--dangerously-skip-permissions ${args.join(" ")}`);
   });
+
+  test("ccc -1 starts the default account with permissions bypassed", () => {
+    const r = sb.ccc(["-1"]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(lastCall(sb), { configDir: "<unset>", args: "--dangerously-skip-permissions" });
+  });
+
+  for (const [name, args, expected] of [
+    ["an explicit planning mode", ["--permission-mode", "plan", "-c"], "--permission-mode plan -c"],
+    ["an explicit manual mode", ["--permission-mode", "manual"], "--permission-mode manual"],
+    ["an equals-style permission mode", ["--permission-mode=plan"], "--permission-mode=plan"],
+    ["a permission-looking positional argument", ["--", "--permission-mode"], "--dangerously-skip-permissions -- --permission-mode"],
+    ["permission-option text in a prompt", ["--append-system-prompt", "Document --permission-mode without changing modes."], "--dangerously-skip-permissions --append-system-prompt Document --permission-mode without changing modes."],
+    ["quoted prompt text", ["--append-system-prompt", 'Keep "quotes", spaces, & separators as text.'], '--dangerously-skip-permissions --append-system-prompt Keep "quotes", spaces, & separators as text.'],
+  ]) {
+    test(`preserves ${name}`, () => {
+      const r = sb.ccc(["2", ...args]);
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(lastCall(sb).args, expected);
+    });
+  }
 
   test("launching a profile wires up the shared session history", () => {
     sb.ccc(["5"]);
@@ -259,10 +281,20 @@ describe("the picker path", () => {
       const r = sb.ccc(["--resume"], { input: "2\n" });
       assert.equal(r.status, 0, r.stderr);
       assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account2"));
-      assert.equal(lastCall(sb).args, "--resume");
+      assert.equal(lastCall(sb).args, "--dangerously-skip-permissions --resume");
     } finally {
       sb.cleanup();
     }
+  });
+
+  test("an explicit permission mode survives the picker", () => {
+    const sb = makeSandbox();
+    try {
+      sb.install();
+      const r = sb.ccc(["--permission-mode", "plan"], { input: "2\n" });
+      assert.equal(r.status, 0, r.stderr);
+      assert.equal(lastCall(sb).args, "--permission-mode plan");
+    } finally { sb.cleanup(); }
   });
 
   test("choosing the default profile leaves CLAUDE_CONFIG_DIR unset", () => {
@@ -766,7 +798,7 @@ describe("ccc and the GPT models", () => {
     assert.equal(r.status, 0, r.stderr);
     const call = lastCall(sb);
     assert.equal(call.configDir, join(sb.profilesDir, "account6"));
-    assert.match(plain(call.args), /^--settings \S+\.json -c$/);
+    assert.match(plain(call.args), /^--settings \S+\.json --dangerously-skip-permissions -c$/);
   });
 
   test("--gpt adds the GPT models to a Claude account for one launch, and never reaches claude", () => {
@@ -775,11 +807,23 @@ describe("ccc and the GPT models", () => {
     assert.equal(r.status, 0, r.stderr);
     const call = lastCall(sb);
     assert.equal(call.configDir, join(sb.profilesDir, "account2"));
-    assert.match(plain(call.args), /^--settings \S+\.json -c$/);
+    assert.match(plain(call.args), /^--settings \S+\.json --dangerously-skip-permissions -c$/);
 
     sb.ccc(["2", "-c"]);
-    assert.equal(lastCall(sb).args, "-c", "without it, the account starts as always");
+    assert.equal(lastCall(sb).args, "--dangerously-skip-permissions -c", "without --gpt, the account starts directly with the same permission default");
   });
+
+  for (const [name, args] of [
+    ["GPT", ["6", "--permission-mode", "plan", "-c"]],
+    ["mixed", ["2", "--gpt", "--permission-mode", "plan", "-c"]],
+  ]) {
+    test(`an explicit permission mode survives ${name} routing`, () => {
+      signIn();
+      const r = sb.ccc(args);
+      assert.equal(r.status, 0, r.stderr);
+      assert.match(plain(lastCall(sb).args), /^--settings \S+\.json --permission-mode plan -c$/);
+    });
+  }
 
   test("an account whose saved default model is a GPT model starts through the router by itself", () => {
     signIn();
@@ -788,7 +832,7 @@ describe("ccc and the GPT models", () => {
     sb.writeJson(settings, { ...saved, model: "gpt-6.1-sol" });
     try {
       sb.ccc(["2"]);
-      assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+      assert.match(plain(lastCall(sb).args), /^--settings \S+\.json --dangerously-skip-permissions$/);
     } finally {
       sb.writeJson(settings, saved);
     }
@@ -799,7 +843,7 @@ describe("ccc and the GPT models", () => {
     const r = sb.ccc([], { input: "6\n", env: { ...sb.env, CCC_NO_USAGE: "1" } });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account6"));
-    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json --dangerously-skip-permissions$/);
   });
 
   test("picking a Claude account with --gpt on the command line works too", () => {
@@ -807,6 +851,6 @@ describe("ccc and the GPT models", () => {
     const r = sb.ccc(["--gpt"], { input: "2\n", env: { ...sb.env, CCC_NO_USAGE: "1" } });
     assert.equal(r.status, 0, r.stderr);
     assert.equal(lastCall(sb).configDir, join(sb.profilesDir, "account2"));
-    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json$/);
+    assert.match(plain(lastCall(sb).args), /^--settings \S+\.json --dangerously-skip-permissions$/);
   });
 });

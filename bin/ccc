@@ -106,10 +106,19 @@ resolve_slot() {
 launch() {
     local slot="$1"
     shift
-    local args=() want_gpt=() arg target mode
+    local args=() want_gpt=() arg target mode permission_flag=--dangerously-skip-permissions
     for arg in "$@"; do
         if [[ "$arg" == "--gpt" ]]; then want_gpt=(--gpt); else args+=("$arg"); fi
     done
+    for arg in "${args[@]}"; do
+        case "$arg" in
+            --) break ;;
+            --dangerously-skip-permissions | --permission-mode | --permission-mode=*) permission_flag=; break ;;
+        esac
+    done
+    if [[ -n "$permission_flag" ]]; then
+        args=("$permission_flag" "${args[@]}")
+    fi
 
     target=$(resolve_slot "$slot") || exit
     mode=$(node "$PROFILES_LIB" launch-mode "${slot#-}" "${want_gpt[@]}") || exit

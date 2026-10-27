@@ -247,6 +247,18 @@ if not defined TARGET (
 set "MODE="
 for /f "delims=" %%m in ('node "%PROFILES_LIB%" launch-mode !LAUNCH_SLOT! !WANT_GPT!') do set "MODE=%%m"
 if not defined MODE set "MODE=claude"
+set "DEFAULT_PERMISSION=--dangerously-skip-permissions"
+set "SCAN_PERMISSION_OPTIONS=1"
+for %%a in (!SLOT_ARGS!) do (
+    if defined SCAN_PERMISSION_OPTIONS (
+        set "SESSION_ARG=%%~a"
+        if "!SESSION_ARG!"=="--" set "SCAN_PERMISSION_OPTIONS="
+        if "!SESSION_ARG!"=="--dangerously-skip-permissions" set "DEFAULT_PERMISSION="
+        if "!SESSION_ARG!"=="--permission-mode" set "DEFAULT_PERMISSION="
+        if "!SESSION_ARG:~0,18!"=="--permission-mode=" set "DEFAULT_PERMISSION="
+    )
+)
+if defined DEFAULT_PERMISSION set "SLOT_ARGS=!DEFAULT_PERMISSION! !SLOT_ARGS!"
 call :launch "!TARGET!" "!SLOT_ARGS!"
 exit /b !ERRORLEVEL!
 

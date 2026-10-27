@@ -63,7 +63,8 @@ function paths(home) {
     auth: path.join(dir, "auth.json"),
     lock: path.join(dir, "auth.lock"),
     models: path.join(dir, "models.json"),
-    limits: path.join(dir, "limits.json"),
+    // Older running routers still write unverified snapshots to limits.json.
+    limits: path.join(dir, "limits-v2.json"),
     limitsLock: path.join(dir, "limits.lock"),
     sessions: path.join(dir, "sessions"),
     log: path.join(dir, "router.log"),
@@ -587,11 +588,11 @@ async function planLimits({ home, maxAgeMs = LIMITS_FRESH_MS, env = process.env,
   const account = usageAccount(readJson(p.auth));
   if (!account) return { status: "signed_out", error: "ccc needs an identifiable ChatGPT sign-in" };
   const before = cachedPlanLimits({ home });
-  if (before && before.status === "ok" && Date.now() - before.fetchedAt < maxAgeMs) return before;
+  if (before && Date.now() - (before.checkedAt ?? before.fetchedAt) < maxAgeMs) return before;
   try {
     return await withLock({ ...p, lock: p.limitsLock }, async () => {
       const cached = cachedPlanLimits({ home });
-      if (cached && (cached.checkId !== (before && before.checkId) || (cached.status === "ok" && Date.now() - cached.fetchedAt < maxAgeMs))) return cached;
+      if (cached && (cached.checkId !== (before && before.checkId) || Date.now() - (cached.checkedAt ?? cached.fetchedAt) < maxAgeMs)) return cached;
       const fresh = await askCodex({ command: findCodex({ env, home: home || os.homedir() }), expectedEmail: account.email, env, timeoutMs });
       const current = usageAccount(readJson(p.auth));
       if (!current || current.key !== account.key) return { status: "account_changed", error: "the ChatGPT sign-in changed during the usage lookup" };
@@ -599,7 +600,7 @@ async function planLimits({ home, maxAgeMs = LIMITS_FRESH_MS, env = process.env,
       const result = !cannotVerify && fresh.status !== "ok" && cached && cached.status === "ok"
         ? { ...cached, stale: true, refreshError: fresh.error || "Codex could not report usage" }
         : fresh;
-      const bound = { ...result, source: "codex", accountKey: account.key, checkId: crypto.randomUUID() };
+      const bound = { ...result, source: "codex", accountKey: account.key, checkId: crypto.randomUUID(), checkedAt: Date.now() };
       try {
         writePrivate(p.limits, bound);
       } catch {}
@@ -618,6 +619,26 @@ function cachedPlanLimits({ home } = {}) {
   if (!account || !cached || cached.source !== "codex" || cached.accountKey !== account.key) return null;
   if (cached.status === "ok" && (!Number.isFinite(cached.fetchedAt) || !Array.isArray(cached.windows))) return null;
   return cached;
+}
+
+function refreshPlanLimitsInBackground({ home = os.homedir(), env = process.env, now = Date.now(), spawnProcess = spawn } = {}) {
+  if (env.CCC_NO_USAGE) return false;
+  const p = paths(home);
+  if (!usageAccount(readJson(p.auth))) return false;
+  const cached = cachedPlanLimits({ home });
+  if (cached && now - (cached.checkedAt ?? cached.fetchedAt) < LIMITS_FRESH_MS) return false;
+  try {
+    if (now - fs.statSync(p.limitsLock).mtimeMs < LOCK_STALE_MS) return false;
+  } catch {}
+  const child = spawnProcess(process.execPath, [__filename, "status", "--json", "--refresh"], {
+    env: { ...env, HOME: home, USERPROFILE: home },
+    stdio: "ignore",
+    detached: true,
+    windowsHide: true,
+  });
+  child.on("error", () => {});
+  child.unref();
+  return true;
 }
 
 // Whether a model id is one of the GPT models, by the cached list or its name.
@@ -922,6 +943,7 @@ async function main(argv, { out = (l) => process.stdout.write(l + "\n"), err = (
     }
 
     case "status": {
+      if (rest.includes("--json") && rest.includes("--refresh")) await planLimits();
       const s = status();
       if (rest.includes("--json")) {
         out(JSON.stringify(s));
@@ -1016,6 +1038,7 @@ module.exports = {
   askCodex,
   planLimits,
   cachedPlanLimits,
+  refreshPlanLimitsInBackground,
   isGptModelId,
   login,
   logout,

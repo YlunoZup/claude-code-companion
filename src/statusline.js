@@ -287,6 +287,7 @@ function main() {
   }
 
   process.stdout.write(render(session, process.env.CLAUDE_CONFIG_DIR) + "\n");
+  if (session && isGptModel(session.model && session.model.id)) chatgpt.refreshPlanLimitsInBackground();
 }
 
 module.exports = {
